@@ -17,7 +17,7 @@
 // No direct imports from internal ST modules needed.
 
 const EXT_NAME = 'qwen-tts-streaming';
-const EXT_FOLDER = `scripts/extensions/third-party/${EXT_NAME}`;
+const EXT_FOLDER = 'scripts/extensions/third-party/SillyTavern-TTS-Real-Time-Streaming';
 
 const DEFAULT_SETTINGS = Object.freeze({
     enabled: false,
