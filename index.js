@@ -26,6 +26,7 @@ const DEFAULT_SETTINGS = Object.freeze({
     speaker_wav: '',
     language: 'en',
     volume: 1.0,
+    voiceMap: {},   // { characterName: speaker_wav } — per-character voice override
 });
 
 // ── State ──────────────────────────────────────────────────────────────────────
@@ -49,9 +50,11 @@ function getSettings() {
         extensionSettings[EXT_NAME] = {};
     }
     // Backfill any missing keys with their defaults — handles new keys added in updates.
+    // Object values get a shallow copy so different settings objects don't share the same reference.
     for (const [key, value] of Object.entries(DEFAULT_SETTINGS)) {
         if (extensionSettings[EXT_NAME][key] === undefined) {
-            extensionSettings[EXT_NAME][key] = value;
+            extensionSettings[EXT_NAME][key] =
+                (typeof value === 'object' && value !== null) ? { ...value } : value;
         }
     }
     return extensionSettings[EXT_NAME];
@@ -115,21 +118,25 @@ function stopAudio() {
 
 // ── WebSocket management ───────────────────────────────────────────────────────
 
-function buildWsUrl() {
+/**
+ * @param {string|null} speakerOverride  use this speaker_wav instead of the global setting (null = use global)
+ */
+function buildWsUrl(speakerOverride = null) {
     const s = getSettings();
     const base = s.ws_endpoint.replace(/\/+$/, '');
     const params = new URLSearchParams();
-    if (s.speaker_wav) params.set('speaker_wav', s.speaker_wav);
-    if (s.language)    params.set('language', s.language);
+    const speaker = speakerOverride !== null ? speakerOverride : s.speaker_wav;
+    if (speaker)    params.set('speaker_wav', speaker);
+    if (s.language) params.set('language', s.language);
     const qs = params.toString();
     return qs ? `${base}?${qs}` : base;
 }
 
-function openWs() {
+function openWs(speakerOverride = null) {
     if (ws && ws.readyState === WebSocket.OPEN) return;
     closeWs();
 
-    const url = buildWsUrl();
+    const url = buildWsUrl(speakerOverride);
     console.info(`[${EXT_NAME}] Connecting → ${url}`);
 
     ws = new WebSocket(url);
@@ -208,7 +215,8 @@ function onStreamToken(text) {
 }
 
 function onGenerationStarted() {
-    if (!getSettings().enabled) return;
+    const s = getSettings();
+    if (!s.enabled) return;
 
     isGenerating = true;
     lastSentLength = 0;
@@ -217,7 +225,21 @@ function onGenerationStarted() {
     stopAudio();
     ensureAudioContext();
 
-    openWs();
+    // Resolve which speaker voice to use for this generation.
+    // Priority: per-character voice map → global speaker_wav fallback.
+    let speakerOverride = null;
+    try {
+        const ctx = SillyTavern.getContext();
+        const charName = ctx.name2; // active character name in current chat
+        if (charName && s.voiceMap && charName in s.voiceMap) {
+            // voiceMap[name] === '' means "use default" (user cleared it)
+            speakerOverride = s.voiceMap[charName] || null;
+        }
+    } catch (e) {
+        console.warn(`[${EXT_NAME}] Could not resolve character voice:`, e);
+    }
+
+    openWs(speakerOverride);
 }
 
 function onGenerationEnded() {
@@ -337,6 +359,74 @@ function loadSettingsUI() {
     });
 }
 
+// ── Per-character voice map UI ─────────────────────────────────────────────────
+
+/**
+ * Render one row per character in the current chat inside #qts_voicemap_block.
+ * Each row has a text input that overrides the global speaker_wav for that character.
+ * Called on load and whenever the chat changes.
+ */
+function buildVoiceMapUI() {
+    const block = $('#qts_voicemap_block');
+    if (!block.length) return;
+    block.empty();
+
+    const s   = getSettings();
+    const ctx = SillyTavern.getContext();
+
+    // Collect character names visible in the current chat
+    const chars = [];
+    if (ctx.groupId) {
+        const group = ctx.groups && ctx.groups.find(g => g.id === ctx.groupId);
+        if (group) {
+            for (const member of (group.members || [])) {
+                const char = ctx.characters && ctx.characters.find(c => c.avatar === member);
+                if (char) chars.push(char.name);
+            }
+        }
+    } else if (ctx.name2) {
+        chars.push(ctx.name2);
+    }
+
+    if (chars.length === 0) {
+        block.html('<small style="color:#666;font-style:italic">Open a chat to see characters here.</small>');
+        return;
+    }
+
+    if (!s.voiceMap || typeof s.voiceMap !== 'object') {
+        s.voiceMap = {};
+    }
+
+    for (const name of chars) {
+        // Build a DOM-safe id from the character name
+        const safeId      = `qts_voice_${encodeURIComponent(name).replace(/[^a-zA-Z0-9]/g, '_')}`;
+        const currentVoice = (s.voiceMap[name] !== undefined) ? s.voiceMap[name] : '';
+
+        const row = $(`
+            <div class="flex-container flexGap5 alignItemsCenter" style="margin-bottom:6px">
+                <span style="min-width:110px;flex:0 0 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+                      title="${name.replace(/"/g, '&quot;')}">${name}</span>
+                <input type="text" id="${safeId}" class="text_pole"
+                       placeholder="(use default)"
+                       value="${currentVoice.replace(/"/g, '&quot;')}"
+                       style="flex:1" />
+            </div>
+        `);
+        block.append(row);
+
+        $(`#${safeId}`).off('input').on('input', function () {
+            const v = $(this).val().trim();
+            if (!s.voiceMap || typeof s.voiceMap !== 'object') s.voiceMap = {};
+            if (v) {
+                s.voiceMap[name] = v;
+            } else {
+                delete s.voiceMap[name];
+            }
+            saveSettings();
+        });
+    }
+}
+
 // ── Init ───────────────────────────────────────────────────────────────────────
 
 jQuery(async () => {
@@ -345,6 +435,7 @@ jQuery(async () => {
     const settingsHtml = await $.get(`${EXT_FOLDER}/settings.html`);
     $('#extensions_settings').append(settingsHtml);
     loadSettingsUI();
+    buildVoiceMapUI();
 
     // Register event listeners
     eventSource.on(event_types.GENERATION_STARTED,    onGenerationStarted);
@@ -353,6 +444,9 @@ jQuery(async () => {
     eventSource.on(event_types.GENERATION_STOPPED,    onGenerationStopped); // user abort
     // NOTE: GENERATION_AFTER_COMMANDS fires after every generation (not only on abort)
     // so it is intentionally NOT used here — it would send a second [END] every time.
+
+    // Rebuild the per-character voice map UI whenever the active chat changes.
+    eventSource.on(event_types.CHAT_CHANGED, () => buildVoiceMapUI());
 
     console.info(`[${EXT_NAME}] Extension loaded`);
 });
