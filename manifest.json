@@ -1,0 +1,13 @@
+{
+    "display_name": "Qwen TTS Streaming",
+    "version": "1.0.0",
+    "author": "local",
+    "homePage": "",
+    "auto_update": false,
+    "js": "index.js",
+    "css": "style.css",
+    "description": "Real-time LLM token streaming to Qwen3-TTS via WebSocket. Speaks each sentence as soon as it is generated.",
+    "requires": [],
+    "optional": [],
+    "tags": ["tts", "streaming"]
+}

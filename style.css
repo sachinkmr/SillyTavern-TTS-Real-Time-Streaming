@@ -1,0 +1,12 @@
+#qwen_tts_streaming_settings {
+    padding: 8px 0;
+}
+
+#qwen_tts_streaming_settings .qts-header {
+    margin-bottom: 4px;
+}
+
+#qts_test_btn {
+    padding: 4px 12px;
+    font-size: 0.9em;
+}
