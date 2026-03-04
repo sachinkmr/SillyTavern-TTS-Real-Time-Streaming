@@ -12,10 +12,9 @@
  *       to avoid double-playback after generation completes.
  */
 
-// Prefer getContext() (stable API) over direct imports where possible.
-// eventSource / event_types are imported directly as they are not yet exposed
-// through getContext in all ST builds.
-import { eventSource, event_types } from '../../../../script.js';
+// All ST APIs are accessed through SillyTavern.getContext() — the stable,
+// update-proof surface recommended by ST extension guidelines.
+// No direct imports from internal ST modules needed.
 
 const EXT_NAME = 'qwen-tts-streaming';
 const EXT_FOLDER = `scripts/extensions/third-party/${EXT_NAME}`;
@@ -46,17 +45,13 @@ let gainNode = null;         // volume control node
  */
 function getSettings() {
     const { extensionSettings } = SillyTavern.getContext();
-    if (!extensionSettings[EXT_NAME]) {
-        extensionSettings[EXT_NAME] = {};
-    }
-    // Backfill any missing keys with their defaults — handles new keys added in updates.
-    // Object values get a shallow copy so different settings objects don't share the same reference.
-    for (const [key, value] of Object.entries(DEFAULT_SETTINGS)) {
-        if (extensionSettings[EXT_NAME][key] === undefined) {
-            extensionSettings[EXT_NAME][key] =
-                (typeof value === 'object' && value !== null) ? { ...value } : value;
-        }
-    }
+    // lodash.merge deep-merges defaults into existing settings in-place.
+    // This handles both first-run initialisation and backfilling new keys after updates.
+    const { lodash } = SillyTavern.libs;
+    extensionSettings[EXT_NAME] = lodash.merge(
+        structuredClone(DEFAULT_SETTINGS),
+        extensionSettings[EXT_NAME] ?? {},
+    );
     return extensionSettings[EXT_NAME];
 }
 
@@ -399,19 +394,23 @@ function buildVoiceMapUI() {
 
     for (const name of chars) {
         // Build a DOM-safe id from the character name
-        const safeId      = `qts_voice_${encodeURIComponent(name).replace(/[^a-zA-Z0-9]/g, '_')}`;
+        const safeId       = `qts_voice_${encodeURIComponent(name).replace(/[^a-zA-Z0-9]/g, '_')}`;
         const currentVoice = (s.voiceMap[name] !== undefined) ? s.voiceMap[name] : '';
 
-        const row = $(`
-            <div class="flex-container flexGap5 alignItemsCenter" style="margin-bottom:6px">
-                <span style="min-width:110px;flex:0 0 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
-                      title="${name.replace(/"/g, '&quot;')}">${name}</span>
-                <input type="text" id="${safeId}" class="text_pole"
-                       placeholder="(use default)"
-                       value="${currentVoice.replace(/"/g, '&quot;')}"
-                       style="flex:1" />
-            </div>
-        `);
+        // Build the row via jQuery DOM construction — never interpolate user content into
+        // raw HTML strings (XSS risk if a character name contains < > " etc.).
+        const nameSpan = $('<span>')
+            .text(name)          // .text() escapes HTML automatically
+            .attr('title', name)
+            .css({ minWidth: '110px', flex: '0 0 auto', overflow: 'hidden',
+                   textOverflow: 'ellipsis', whiteSpace: 'nowrap' });
+        const input = $('<input>', {
+            type: 'text', id: safeId, class: 'text_pole',
+            placeholder: '(use default)', value: currentVoice,
+        }).css('flex', '1');
+        const row = $('<div>', { class: 'flex-container flexGap5 alignItemsCenter' })
+            .css('margin-bottom', '6px')
+            .append(nameSpan, input);
         block.append(row);
 
         $(`#${safeId}`).off('input').on('input', function () {
@@ -436,6 +435,10 @@ jQuery(async () => {
     $('#extensions_settings').append(settingsHtml);
     loadSettingsUI();
     buildVoiceMapUI();
+
+    // Obtain eventSource and event_types through the stable getContext() API
+    // rather than importing them directly from internal ST modules.
+    const { eventSource, event_types } = SillyTavern.getContext();
 
     // Register event listeners
     eventSource.on(event_types.GENERATION_STARTED,    onGenerationStarted);
