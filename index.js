@@ -12,18 +12,21 @@
  *       to avoid double-playback after generation completes.
  */
 
+// Prefer getContext() (stable API) over direct imports where possible.
+// eventSource / event_types are imported directly as they are not yet exposed
+// through getContext in all ST builds.
 import { eventSource, event_types } from '../../../../script.js';
-import { extension_settings, saveSettingsDebounced } from '../../../extensions.js';
 
 const EXT_NAME = 'qwen-tts-streaming';
+const EXT_FOLDER = `scripts/extensions/third-party/${EXT_NAME}`;
 
-const DEFAULT_SETTINGS = {
+const DEFAULT_SETTINGS = Object.freeze({
     enabled: false,
     ws_endpoint: 'ws://192.168.1.100:7860/ws/tts',
     speaker_wav: '',
     language: 'en',
     volume: 1.0,
-};
+});
 
 // ── State ──────────────────────────────────────────────────────────────────────
 
@@ -36,11 +39,27 @@ let gainNode = null;         // volume control node
 
 // ── Settings helpers ───────────────────────────────────────────────────────────
 
+/**
+ * Returns the extension settings object, initialising it and backfilling any
+ * keys that may be missing after an update (so existing users are not broken).
+ */
 function getSettings() {
-    if (!extension_settings[EXT_NAME]) {
-        extension_settings[EXT_NAME] = Object.assign({}, DEFAULT_SETTINGS);
+    const { extensionSettings } = SillyTavern.getContext();
+    if (!extensionSettings[EXT_NAME]) {
+        extensionSettings[EXT_NAME] = {};
     }
-    return extension_settings[EXT_NAME];
+    // Backfill any missing keys with their defaults — handles new keys added in updates.
+    for (const [key, value] of Object.entries(DEFAULT_SETTINGS)) {
+        if (extensionSettings[EXT_NAME][key] === undefined) {
+            extensionSettings[EXT_NAME][key] = value;
+        }
+    }
+    return extensionSettings[EXT_NAME];
+}
+
+function saveSettings() {
+    const { saveSettingsDebounced } = SillyTavern.getContext();
+    saveSettingsDebounced();
 }
 
 // ── Audio playback ─────────────────────────────────────────────────────────────
@@ -218,56 +237,6 @@ function onGenerationStopped() {
 
 // ── Settings UI ────────────────────────────────────────────────────────────────
 
-const SETTINGS_HTML = `
-<div id="qwen_tts_streaming_settings">
-    <div class="qts-header">
-        <b>Qwen TTS — Real-Time Streaming</b>
-        <small style="color:#aaa;display:block;margin-top:4px;">
-            Speaks each sentence as it is generated, without waiting for the full reply.<br>
-            ⚠️ Disable any other TTS provider to avoid double-playback.
-        </small>
-    </div>
-    <hr>
-
-    <label class="checkbox_label" style="margin:8px 0">
-        <input type="checkbox" id="qts_enabled" />
-        <span>Enable Qwen TTS Streaming</span>
-    </label>
-
-    <label style="display:block;margin-top:8px">
-        WebSocket Endpoint:
-        <input type="text" id="qts_ws_endpoint" class="text_pole"
-               placeholder="ws://192.168.1.100:7860/ws/tts" style="width:100%;margin-top:4px"/>
-    </label>
-
-    <label style="display:block;margin-top:8px">
-        Speaker / Voice ID:
-        <input type="text" id="qts_speaker" class="text_pole"
-               placeholder="e.g. Clone 1, custom_Alice (leave blank for default)"
-               style="width:100%;margin-top:4px"/>
-    </label>
-
-    <label style="display:block;margin-top:8px">
-        Language code:
-        <input type="text" id="qts_language" class="text_pole"
-               placeholder="en" style="width:100%;margin-top:4px"/>
-    </label>
-
-    <label style="display:block;margin-top:8px">
-        Volume: <span id="qts_volume_label">1.0</span>
-        <input type="range" id="qts_volume" min="0" max="2" step="0.05" value="1.0"
-               style="width:100%;margin-top:4px"/>
-    </label>
-
-    <div style="margin-top:12px">
-        <button class="menu_button" id="qts_test_btn" title="Send a test phrase">
-            ▶ Test Voice
-        </button>
-        <span id="qts_status" style="margin-left:8px;font-size:0.85em;color:#aaa"></span>
-    </div>
-</div>
-`;
-
 function loadSettingsUI() {
     const s = getSettings();
 
@@ -276,35 +245,47 @@ function loadSettingsUI() {
     $('#qts_speaker').val(s.speaker_wav);
     $('#qts_language').val(s.language);
     $('#qts_volume').val(s.volume);
-    $('#qts_volume_label').text(s.volume);
+    $('#qts_volume_counter').val(s.volume);
+    $('#qts_volume_label').text(Number(s.volume).toFixed(2));
 
     // Guard against handler stacking if ST re-renders the extensions panel
     $('#qts_enabled').off('change').on('change', function () {
         getSettings().enabled = $(this).is(':checked');
-        saveSettingsDebounced();
+        saveSettings();
     });
 
     $('#qts_ws_endpoint').off('input').on('input', function () {
         getSettings().ws_endpoint = $(this).val().trim();
-        saveSettingsDebounced();
+        saveSettings();
     });
 
     $('#qts_speaker').off('input').on('input', function () {
         getSettings().speaker_wav = $(this).val().trim();
-        saveSettingsDebounced();
+        saveSettings();
     });
 
     $('#qts_language').off('input').on('input', function () {
         getSettings().language = $(this).val().trim() || 'en';
-        saveSettingsDebounced();
+        saveSettings();
     });
 
+    // Keep the range slider and its numeric counter in sync.
     $('#qts_volume').off('input').on('input', function () {
         const v = parseFloat($(this).val());
         getSettings().volume = v;
         $('#qts_volume_label').text(v.toFixed(2));
+        $('#qts_volume_counter').val(v.toFixed(2));
         if (gainNode) gainNode.gain.value = v;
-        saveSettingsDebounced();
+        saveSettings();
+    });
+
+    $('#qts_volume_counter').off('input').on('input', function () {
+        const v = Math.min(2, Math.max(0, parseFloat($(this).val()) || 0));
+        getSettings().volume = v;
+        $('#qts_volume_label').text(v.toFixed(2));
+        $('#qts_volume').val(v);
+        if (gainNode) gainNode.gain.value = v;
+        saveSettings();
     });
 
     $('#qts_test_btn').off('click').on('click', async function () {
@@ -359,15 +340,11 @@ function loadSettingsUI() {
 // ── Init ───────────────────────────────────────────────────────────────────────
 
 jQuery(async () => {
-    // Inject settings panel
-    const settingsContainer = document.getElementById('extensions_settings2')
-        || document.getElementById('extensions_settings');
-    if (settingsContainer) {
-        const wrapper = document.createElement('div');
-        wrapper.innerHTML = SETTINGS_HTML;
-        settingsContainer.appendChild(wrapper);
-        loadSettingsUI();
-    }
+    // Load settings HTML from the external file and inject into the ST settings panel.
+    // #extensions_settings = left column (system/functional extensions — correct for TTS).
+    const settingsHtml = await $.get(`${EXT_FOLDER}/settings.html`);
+    $('#extensions_settings').append(settingsHtml);
+    loadSettingsUI();
 
     // Register event listeners
     eventSource.on(event_types.GENERATION_STARTED,    onGenerationStarted);

@@ -1,9 +1,5 @@
-#qwen_tts_streaming_settings {
-    padding: 8px 0;
-}
-
-#qwen_tts_streaming_settings .qts-header {
-    margin-bottom: 4px;
+#qwen_tts_streaming_settings .inline-drawer-content {
+    padding: 4px 0;
 }
 
 #qts_test_btn {
