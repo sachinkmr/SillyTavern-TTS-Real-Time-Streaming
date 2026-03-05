@@ -1,11 +1,10 @@
 {
     "display_name": "Qwen TTS Streaming",
-    "version": "1.2.0",
+    "version": "1.3.0",
     "author": "sachinkmr",
     "homePage": "https://github.com/sachinkmr/SillyTavern-TTS-Real-Time-Streaming",
     "auto_update": true,
     "js": "index.js",
-    "css": "style.css",
-    "description": "Real-time LLM token streaming to Qwen3-TTS via WebSocket. Speaks each sentence as soon as it is generated.",
+    "description": "Registers as a proper ST TTS provider (Narrate button, per-character voice map). BONUS: real-time streaming speaks each sentence as the LLM generates it.",
     "tags": ["tts", "streaming"]
 }

@@ -1,557 +1,427 @@
 /**
- * Qwen TTS Streaming — SillyTavern Extension
+ * Qwen TTS — Real-Time Streaming  (v1.3.0)
+ * SillyTavern Extension
  *
- * Pipes LLM streaming tokens in real-time to the Qwen3-TTS WebSocket endpoint
- * (/ws/tts), so each sentence is spoken the moment it is generated — no waiting
- * for the full reply to finish.
+ * Registers as a proper ST TTS provider — gives the Narrate button,
+ * per-character voice map, enable/disable toggle, and voice preview
+ * automatically (same as XTTSv2 / tts-webui).
  *
- * Install: copy this folder into SillyTavern/public/scripts/extensions/third-party/
- * then enable via Extensions panel.
+ * BONUS: Real-time streaming mode speaks each sentence the moment it is
+ * generated, without waiting for the full reply to finish.
  *
- * NOTE: Disable any other TTS provider (e.g. tts-webui) while using this extension
+ * Install: copy folder to SillyTavern/public/scripts/extensions/third-party/
+ *          Enable in Extensions, then select "Qwen3 TTS (Streaming)" in TTS panel.
+ * Note: If Real-time Streaming is ON, disable "Auto-read aloud" in TTS settings
  *       to avoid double-playback after generation completes.
  */
 
-// All ST APIs are accessed through SillyTavern.getContext() — the stable,
-// update-proof surface recommended by ST extension guidelines.
-// No direct imports from internal ST modules needed.
+// ── Module-level streaming state ──────────────────────────────────────────────
 
-const EXT_NAME = 'qwen-tts-streaming';
-const EXT_FOLDER = 'scripts/extensions/third-party/SillyTavern-TTS-Real-Time-Streaming';
+const EXT_NAME = 'Qwen3 TTS (Streaming)';
 
-const DEFAULT_SETTINGS = Object.freeze({
-    enabled: false,
-    ws_endpoint: 'ws://192.168.1.100:7860/ws/tts',
-    speaker_wav: '',
-    language: 'en',
-    volume: 1.0,
-    available_voices: [],  // voice IDs fetched from server or entered manually
-    voiceMap: {},          // { characterName: speaker_wav | '__disabled__' } — per-character override
-});
+let ws               = null;
+let audioCtx         = null;
+let gainNode         = null;
+let nextStartTime    = 0;
+let lastSentLength   = 0;
+let isGenerating     = false;
+let streamPlayedAt   = 0;   // timestamp of last streaming session end (for dedup)
+let currentProvider  = null;
 
-// ── State ──────────────────────────────────────────────────────────────────────
+// Populated after dynamic import of ST's TTS index
+let _saveTtsProviderSettings = () => {};
+let _getPreviewString        = () => 'Hello, this is a test of the Qwen TTS voice.';
 
-let ws = null;               // active WebSocket
-let audioCtx = null;         // single AudioContext for the session
-let nextStartTime = 0;       // when the next audio chunk should start playing
-let lastSentLength = 0;      // track chars already forwarded to avoid re-sending
-let isGenerating = false;    // true while LLM is streaming
-let gainNode = null;         // volume control node
-
-// ── Settings helpers ───────────────────────────────────────────────────────────
-
-/**
- * Returns the extension settings object, initialising it and backfilling any
- * keys that may be missing after an update (so existing users are not broken).
- */
-function getSettings() {
-    const { extensionSettings } = SillyTavern.getContext();
-    // lodash.merge deep-merges defaults into existing settings in-place.
-    // This handles both first-run initialisation and backfilling new keys after updates.
-    const { lodash } = SillyTavern.libs;
-    extensionSettings[EXT_NAME] = lodash.merge(
-        structuredClone(DEFAULT_SETTINGS),
-        extensionSettings[EXT_NAME] ?? {},
-    );
-    return extensionSettings[EXT_NAME];
-}
-
-function saveSettings() {
-    const { saveSettingsDebounced } = SillyTavern.getContext();
-    saveSettingsDebounced();
-}
-
-// ── Audio playback ─────────────────────────────────────────────────────────────
+// ── Audio helpers ─────────────────────────────────────────────────────────────
 
 function ensureAudioContext() {
     if (!audioCtx || audioCtx.state === 'closed') {
-        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-        gainNode = audioCtx.createGain();
-        gainNode.gain.value = getSettings().volume;
+        audioCtx     = new (window.AudioContext || window.webkitAudioContext)();
+        gainNode     = audioCtx.createGain();
+        gainNode.gain.value = currentProvider?.settings?.volume ?? 1.0;
         gainNode.connect(audioCtx.destination);
         nextStartTime = audioCtx.currentTime;
     }
-    if (audioCtx.state === 'suspended') {
-        audioCtx.resume();
-    }
+    if (audioCtx.state === 'suspended') audioCtx.resume();
 }
 
-/**
- * Each binary WS message from the server is a complete WAV file.
- * Decode it and schedule it to play immediately after the previous chunk.
- */
 function scheduleAudioChunk(arrayBuffer) {
     ensureAudioContext();
-    // Capture ctx + gain locally — stopAudio() may replace them while decode is
-    // in flight, and the callback must not write into a closed context.
     const ctx  = audioCtx;
     const gain = gainNode;
     ctx.decodeAudioData(
-        arrayBuffer.slice(0), // slice to detach — decodeAudioData needs ownership
+        arrayBuffer.slice(0),
         (decoded) => {
             if (ctx.state === 'closed') return;
             const src = ctx.createBufferSource();
-            src.buffer = decoded;
+            src.buffer  = decoded;
             src.connect(gain);
-            const startAt = Math.max(ctx.currentTime + 0.02, nextStartTime);
+            const startAt   = Math.max(ctx.currentTime + 0.02, nextStartTime);
             src.start(startAt);
-            nextStartTime = startAt + decoded.duration;
+            nextStartTime   = startAt + decoded.duration;
         },
-        (err) => {
-            console.warn(`[${EXT_NAME}] Audio decode error:`, err);
-        },
+        (err) => console.warn(`[${EXT_NAME}] Decode error:`, err),
     );
 }
 
 function stopAudio() {
-    if (audioCtx && audioCtx.state !== 'closed') {
-        audioCtx.close();
-        audioCtx = null;
-        gainNode = null;
-    }
+    if (audioCtx && audioCtx.state !== 'closed') { audioCtx.close(); }
+    audioCtx  = null;
+    gainNode  = null;
     nextStartTime = 0;
 }
 
-// ── WebSocket management ───────────────────────────────────────────────────────
+// ── Streaming WebSocket ───────────────────────────────────────────────────────
 
-/**
- * @param {string|null} speakerOverride  use this speaker_wav instead of the global setting (null = use global)
- */
-function buildWsUrl(speakerOverride = null) {
-    const s = getSettings();
-    const base = s.ws_endpoint.replace(/\/+$/, '');
-    const params = new URLSearchParams();
-    const speaker = speakerOverride !== null ? speakerOverride : s.speaker_wav;
-    if (speaker)    params.set('speaker_wav', speaker);
-    if (s.language) params.set('language', s.language);
-    const qs = params.toString();
-    return qs ? `${base}?${qs}` : base;
-}
-
-function openWs(speakerOverride = null) {
+function openStreamWs(voiceId = null) {
+    if (!currentProvider) return;
     if (ws && ws.readyState === WebSocket.OPEN) return;
-    closeWs();
+    closeStreamWs();
 
-    const url = buildWsUrl(speakerOverride);
-    console.info(`[${EXT_NAME}] Connecting → ${url}`);
+    const url = currentProvider.buildWsUrl(voiceId);
+    console.info(`[${EXT_NAME}] Streaming → ${url}`);
 
-    ws = new WebSocket(url);
-    ws.binaryType = 'arraybuffer';
-
-    ws.onopen = () => {
-        console.info(`[${EXT_NAME}] WebSocket connected`);
+    ws              = new WebSocket(url);
+    ws.binaryType   = 'arraybuffer';
+    ws.onopen   = () => console.info(`[${EXT_NAME}] WS connected`);
+    ws.onmessage = (ev) => {
+        if (ev.data instanceof ArrayBuffer) scheduleAudioChunk(ev.data);
+        else if (ev.data === '[DONE]') closeStreamWs();
     };
-
-    ws.onmessage = (event) => {
-        if (event.data instanceof ArrayBuffer) {
-            // Binary = WAV audio for a completed sentence
-            scheduleAudioChunk(event.data);
-        } else if (typeof event.data === 'string') {
-            if (event.data === '[DONE]') {
-                console.info(`[${EXT_NAME}] TTS generation complete`);
-                closeWs();
-            }
-        }
-    };
-
-    ws.onerror = (err) => {
-        console.error(`[${EXT_NAME}] WebSocket error:`, err);
-    };
-
-    ws.onclose = (event) => {
-        console.info(`[${EXT_NAME}] WebSocket closed (code ${event.code})`);
-        ws = null;
-    };
+    ws.onerror  = (err) => console.error(`[${EXT_NAME}] WS error:`, err);
+    ws.onclose  = (ev) => { console.info(`[${EXT_NAME}] WS closed (${ev.code})`); ws = null; };
 }
 
-function closeWs(sendEnd = false) {
+function closeStreamWs(sendEnd = false) {
     if (!ws) return;
     const socket = ws;
-    ws = null; // null immediately so new connections are never blocked by a draining socket
+    ws = null;
     if (sendEnd && socket.readyState === WebSocket.OPEN) {
         socket.send('[END]');
-        // Server closes the connection after sending [DONE]; force-close after a timeout
-        // in case the server never responds (e.g. network drop).
-        setTimeout(() => {
-            if (socket.readyState !== WebSocket.CLOSED) socket.close();
-        }, 10000);
-    } else {
-        if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
-            socket.close();
-        }
+        setTimeout(() => { if (socket.readyState !== WebSocket.CLOSED) socket.close(); }, 10_000);
+    } else if (socket.readyState <= WebSocket.OPEN) { // CONNECTING or OPEN
+        socket.close();
     }
 }
 
-// ── Voice helpers ─────────────────────────────────────────────────────────────
-
-/**
- * Convert a ws:// or wss:// endpoint URL to an http:// base URL for REST calls.
- * e.g. ws://192.168.1.100:7860/ws/tts → http://192.168.1.100:7860
- */
-function wsToHttpBase(wsUrl) {
-    return wsUrl
-        .replace(/^wss:\/\//, 'https://')
-        .replace(/^ws:\/\//, 'http://')
-        .replace(/\/ws\/.*$/, '')
-        .replace(/\/+$/, '');
-}
-
-/**
- * Fetch the available voice list from the server's /speakers endpoint.
- * Updates settings and refreshes all voice selects on success.
- */
-async function fetchVoices() {
-    const s = getSettings();
-    const base = wsToHttpBase(s.ws_endpoint);
-    const statusEl = $('#qts_voices_status');
-    statusEl.text('Fetching…');
-    try {
-        const resp = await fetch(`${base}/speakers`);
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        const data = await resp.json();
-        // Server may return: string[], {name}[], or {id: name} object
-        const voices = Array.isArray(data)
-            ? data.map(v => (typeof v === 'string' ? v : (v.name || v.id || String(v))))
-            : Object.keys(data);
-        s.available_voices = voices.filter(Boolean);
-        $('#qts_available_voices').val(s.available_voices.join(', '));
-        refreshAllVoiceSelects();
-        saveSettings();
-        statusEl.text(`✓ ${voices.length} voice${voices.length !== 1 ? 's' : ''}`);
-        setTimeout(() => statusEl.text(''), 3000);
-    } catch (e) {
-        statusEl.text(`✗ ${e.message}`);
-        setTimeout(() => statusEl.text(''), 5000);
-    }
-}
-
-/**
- * Populate a <select> element with voice options.
- * @param {JQuery} sel          - the <select> jQuery element
- * @param {string[]} voices     - list of voice IDs
- * @param {string} currentVal   - the currently saved value
- * @param {boolean} forCharMap  - true = include "(Disabled)" option
- */
-function buildVoiceSelect(sel, voices, currentVal, forCharMap = false) {
-    sel.empty();
-    sel.append($('<option>', { value: '',             text: forCharMap ? '(Use Global Default)' : '(Server Default)' }));
-    if (forCharMap) {
-        sel.append($('<option>', { value: '__disabled__', text: '(Disabled — skip this character)' }));
-    }
-    for (const v of voices) {
-        sel.append($('<option>', { value: v, text: v }));
-    }
-    sel.val(currentVal || '');
-}
-
-/**
- * Rebuild the global speaker <select> and all per-character <select>s
- * whenever the available_voices list changes.
- */
-function refreshAllVoiceSelects() {
-    const s = getSettings();
-    const voices = s.available_voices || [];
-    buildVoiceSelect($('#qts_speaker'), voices, s.speaker_wav, false);
-    $('#qts_voicemap_block select[data-charname]').each(function () {
-        const name = $(this).data('charname');
-        buildVoiceSelect($(this), voices, (s.voiceMap || {})[name] || '', true);
-    });
-}
-
-// ── ST Event hooks ─────────────────────────────────────────────────────────────
-
-/**
- * ST fires STREAM_TOKEN_RECEIVED with the *full accumulated text* so far on each
- * streaming tick. We compute the delta and forward only new characters to the WS.
- */
-function onStreamToken(text) {
-    if (!getSettings().enabled) return;
-    if (!isGenerating) return;
-    if (typeof text !== 'string') return;
-
-    // Reconnect if the socket dropped mid-generation
-    if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
-        console.warn(`[${EXT_NAME}] WS dropped mid-generation — reconnecting`);
-        openWs();
-    }
-
-    // Still CONNECTING — the onopen handler will not replay missed tokens, but at
-    // least we won't lose the remainder of the stream once it opens.
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-
-    const newPart = text.slice(lastSentLength);
-    if (newPart.length === 0) return;
-
-    lastSentLength = text.length;
-    ws.send(newPart);
-}
+// ── ST event hooks (real-time streaming) ─────────────────────────────────────
 
 function onGenerationStarted() {
-    const s = getSettings();
-    if (!s.enabled) return;
+    if (!currentProvider?.settings?.streaming) return;
 
-    isGenerating = true;
+    isGenerating   = true;
     lastSentLength = 0;
-
-    // Reset audio scheduling for new session
+    streamPlayedAt = 0;
     stopAudio();
     ensureAudioContext();
 
-    // Resolve which speaker voice to use for this generation.
-    // Priority: per-character voice map → global speaker_wav fallback.
-    let speakerOverride = null;
+    // Resolve per-character voice from ST's TTS voice map
+    let voiceId = null;
     try {
-        const ctx = SillyTavern.getContext();
-        const charName = ctx.name2; // active character name in current chat
-        if (charName && s.voiceMap && charName in s.voiceMap) {
-            const mapped = s.voiceMap[charName];
-            if (mapped === '__disabled__') {
-                // TTS is explicitly disabled for this character — abort generation
-                isGenerating = false;
-                stopAudio();
-                return;
-            }
-            speakerOverride = mapped || null; // '' means use global default
-        }
-    } catch (e) {
-        console.warn(`[${EXT_NAME}] Could not resolve character voice:`, e);
-    }
+        const ctx      = SillyTavern.getContext();
+        const charName = ctx.name2;
+        const voiceMap = ctx.extensionSettings?.tts?.voiceMap ?? {};
+        if (charName && voiceMap[charName]) voiceId = voiceMap[charName];
+    } catch (e) { console.warn(`[${EXT_NAME}] voiceMap error:`, e); }
 
-    openWs(speakerOverride);
+    openStreamWs(voiceId);
+}
+
+function onStreamToken(text) {
+    if (!currentProvider?.settings?.streaming) return;
+    if (!isGenerating || typeof text !== 'string') return;
+
+    if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+        console.warn(`[${EXT_NAME}] WS dropped — reconnecting`);
+        openStreamWs();
+    }
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+    const delta = text.slice(lastSentLength);
+    if (!delta.length) return;
+    lastSentLength = text.length;
+    ws.send(delta);
 }
 
 function onGenerationEnded() {
-    if (!getSettings().enabled) return;
-
-    isGenerating = false;
-    // Signal server to flush its text buffer and finish
-    closeWs(true);
+    if (!currentProvider?.settings?.streaming) return;
+    isGenerating  = false;
+    streamPlayedAt = Date.now();
+    closeStreamWs(true);
 }
 
 function onGenerationStopped() {
-    if (!getSettings().enabled) return;
-
-    isGenerating = false;
-    closeWs(true); // still flush whatever buffer we have
+    if (!currentProvider?.settings?.streaming) return;
+    isGenerating  = false;
+    streamPlayedAt = Date.now();
+    closeStreamWs(true);
 }
 
-// ── Settings UI ────────────────────────────────────────────────────────────────
+// ── Minimal silent WAV (44 header + 1 silent sample) ─────────────────────────
 
-function loadSettingsUI() {
-    const s = getSettings();
-
-    $('#qts_enabled').prop('checked', s.enabled);
-    $('#qts_ws_endpoint').val(s.ws_endpoint);
-    $('#qts_language').val(s.language);
-    $('#qts_volume').val(s.volume);
-    $('#qts_volume_counter').val(s.volume);
-    $('#qts_volume_label').text(Number(s.volume).toFixed(2));
-
-    // Populate available-voices text field
-    $('#qts_available_voices').val((s.available_voices || []).join(', '));
-
-    // Populate global speaker <select> from saved voice list
-    buildVoiceSelect($('#qts_speaker'), s.available_voices || [], s.speaker_wav, false);
-
-    // Guard against handler stacking if ST re-renders the extensions panel
-    $('#qts_enabled').off('change').on('change', function () {
-        getSettings().enabled = $(this).is(':checked');
-        saveSettings();
-    });
-
-    $('#qts_ws_endpoint').off('input').on('input', function () {
-        getSettings().ws_endpoint = $(this).val().trim();
-        saveSettings();
-    });
-
-    // Available voices: parse comma-separated text → array, then refresh all selects
-    $('#qts_available_voices').off('input').on('input', function () {
-        const voices = $(this).val().split(',').map(v => v.trim()).filter(Boolean);
-        getSettings().available_voices = voices;
-        refreshAllVoiceSelects();
-        saveSettings();
-    });
-
-    // Fetch voices button
-    $('#qts_fetch_voices_btn').off('click').on('click', fetchVoices);
-
-    // Speaker / Voice ID — now a <select>
-    $('#qts_speaker').off('change').on('change', function () {
-        getSettings().speaker_wav = $(this).val();
-        saveSettings();
-    });
-
-    // Language — now a <select>
-    $('#qts_language').off('change').on('change', function () {
-        getSettings().language = $(this).val();
-        saveSettings();
-    });
-
-    // Keep the range slider and its numeric counter in sync.
-    $('#qts_volume').off('input').on('input', function () {
-        const v = parseFloat($(this).val());
-        getSettings().volume = v;
-        $('#qts_volume_label').text(v.toFixed(2));
-        $('#qts_volume_counter').val(v.toFixed(2));
-        if (gainNode) gainNode.gain.value = v;
-        saveSettings();
-    });
-
-    $('#qts_volume_counter').off('input').on('input', function () {
-        const v = Math.min(2, Math.max(0, parseFloat($(this).val()) || 0));
-        getSettings().volume = v;
-        $('#qts_volume_label').text(v.toFixed(2));
-        $('#qts_volume').val(v);
-        if (gainNode) gainNode.gain.value = v;
-        saveSettings();
-    });
-
-    $('#qts_test_btn').off('click').on('click', async function () {
-        const statusEl = $('#qts_status');
-        statusEl.text('Connecting…');
-
-        // Use a fully isolated AudioContext so the test never disturbs the live
-        // generation pipeline (stopAudio / ensureAudioContext are NOT called here).
-        let testCtx  = new (window.AudioContext || window.webkitAudioContext)();
-        let testGain = testCtx.createGain();
-        testGain.gain.value = getSettings().volume;
-        testGain.connect(testCtx.destination);
-        let testNextStart = testCtx.currentTime;
-
-        const testWs = new WebSocket(buildWsUrl());
-        testWs.binaryType = 'arraybuffer';
-
-        testWs.onopen = () => {
-            testWs.send('Hello! This is a test of the Qwen TTS streaming voice.');
-            testWs.send('[END]');
-            statusEl.text('Sent — waiting for audio…');
-        };
-
-        testWs.onmessage = (event) => {
-            if (event.data instanceof ArrayBuffer) {
-                statusEl.text('Playing…');
-                testCtx.decodeAudioData(event.data.slice(0), (decoded) => {
-                    if (testCtx.state === 'closed') return;
-                    const src = testCtx.createBufferSource();
-                    src.buffer = decoded;
-                    src.connect(testGain);
-                    const startAt = Math.max(testCtx.currentTime + 0.02, testNextStart);
-                    src.start(startAt);
-                    testNextStart = startAt + decoded.duration;
-                }, (err) => console.warn(`[${EXT_NAME}] Test audio decode error:`, err));
-            } else if (event.data === '[DONE]') {
-                statusEl.text('✓ Done');
-                testWs.close();
-            }
-        };
-
-        testWs.onerror = () => statusEl.text('✗ Connection failed');
-        testWs.onclose = () => {
-            setTimeout(() => {
-                statusEl.text('');
-                testCtx.close();
-            }, 3000);
-        };
-    });
+function silentWav() {
+    const b = new ArrayBuffer(46), v = new DataView(b);
+    const w = (s, o) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+    w('RIFF', 0); v.setUint32(4, 38, true); w('WAVE', 8);
+    w('fmt ', 12); v.setUint32(16, 16, true); v.setUint16(20, 1, true);
+    v.setUint16(22, 1, true); v.setUint32(24, 22050, true); v.setUint32(28, 44100, true);
+    v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+    w('data', 36); v.setUint32(40, 2, true); v.setInt16(44, 0, true);
+    return b;
 }
 
-// ── Per-character voice map UI ─────────────────────────────────────────────────
+// ── Provider class ─────────────────────────────────────────────────────────────
 
-/**
- * Render one row per character in the current chat inside #qts_voicemap_block.
- * Each row has a text input that overrides the global speaker_wav for that character.
- * Called on load and whenever the chat changes.
- */
-function buildVoiceMapUI() {
-    const block = $('#qts_voicemap_block');
-    if (!block.length) return;
-    block.empty();
+class QwenTtsStreamingProvider {
 
-    const s      = getSettings();
-    const ctx    = SillyTavern.getContext();
-    const voices = s.available_voices || [];
+    settings = {};
+    voices   = [];
 
-    // Collect character names visible in the current chat
-    const chars = [];
-    if (ctx.groupId) {
-        const group = ctx.groups && ctx.groups.find(g => g.id === ctx.groupId);
-        if (group) {
-            for (const member of (group.members || [])) {
-                const char = ctx.characters && ctx.characters.find(c => c.avatar === member);
-                if (char) chars.push(char.name);
-            }
+    defaultSettings = {
+        provider_endpoint : 'ws://192.168.1.100:7860/ws/tts',
+        language          : 'en',
+        streaming         : true,
+        volume            : 1.0,
+    };
+
+    languageLabels = {
+        en: 'English', zh: 'Chinese', ja: 'Japanese', ko: 'Korean',
+        fr: 'French',  de: 'German',  es: 'Spanish',  ru: 'Russian',
+        ar: 'Arabic',  hi: 'Hindi',   pt: 'Portuguese', it: 'Italian',
+    };
+
+    // ── settingsHtml ──────────────────────────────────────────────────────────
+    // ST renders this inside the TTS provider panel when this provider is active.
+    // Uses defaultSettings values (loadSettings will update the DOM afterwards).
+    get settingsHtml() {
+        const s = this.defaultSettings;
+        const langOptions = Object.entries(this.languageLabels)
+            .map(([code, label]) =>
+                `<option value="${code}"${code === s.language ? ' selected' : ''}>${label}</option>`)
+            .join('\n                ');
+
+        return `
+<div id="qts_provider_settings">
+    <div class="flex gap10px marginBot10 alignItemsFlexEnd">
+        <div class="flex1 flexFlowColumn">
+            <label for="qts_endpoint">Provider Endpoint (ws:// or wss://):</label>
+            <input id="qts_endpoint" type="text" class="text_pole" maxlength="300"
+                   value="${s.provider_endpoint}"
+                   placeholder="ws://192.168.1.100:7860/ws/tts" />
+        </div>
+    </div>
+
+    <div class="flex gap10px marginBot10">
+        <div class="flex1 flexFlowColumn">
+            <label for="qts_language">Language:</label>
+            <select id="qts_language" class="text_pole">
+                ${langOptions}
+            </select>
+        </div>
+        <div class="flex1 flexFlowColumn">
+            <label for="qts_volume">
+                Volume: <span id="qts_volume_label">${s.volume.toFixed(2)}</span>
+            </label>
+            <input id="qts_volume" type="range" min="0" max="2" step="0.05"
+                   value="${s.volume}" style="width:100%;margin-top:6px" />
+        </div>
+    </div>
+
+    <div class="marginBot10">
+        <label class="checkbox_label">
+            <input id="qts_streaming" type="checkbox" ${s.streaming ? 'checked' : ''} />
+            <span>Real-time Streaming
+                <small style="color:#aaa;display:block;margin-top:2px">
+                    Speaks each sentence as the LLM generates it.
+                    If enabled, disable <em>Auto-read aloud</em> below to avoid double-playback.
+                </small>
+            </span>
+        </label>
+    </div>
+</div>`;
+    }
+
+    // ── loadSettings ──────────────────────────────────────────────────────────
+    // Called by ST when this provider is selected / settings are loaded.
+    async loadSettings(settings) {
+        this.settings = Object.assign({}, this.defaultSettings, settings ?? {});
+
+        // Update DOM with saved values
+        $('#qts_endpoint').val(this.settings.provider_endpoint);
+        $('#qts_language').val(this.settings.language);
+        $('#qts_volume').val(this.settings.volume);
+        $('#qts_volume_label').text(Number(this.settings.volume).toFixed(2));
+        $('#qts_streaming').prop('checked', this.settings.streaming);
+
+        // Bind change handlers (off() first to prevent stacking)
+        $('#qts_endpoint').off('change').on('change', () => {
+            this.settings.provider_endpoint = $('#qts_endpoint').val().trim();
+            _saveTtsProviderSettings();
+        });
+        $('#qts_language').off('change').on('change', () => {
+            this.settings.language = $('#qts_language').val();
+            _saveTtsProviderSettings();
+        });
+        $('#qts_volume').off('input').on('input', (e) => {
+            const v = parseFloat(e.target.value);
+            this.settings.volume = v;
+            $('#qts_volume_label').text(v.toFixed(2));
+            if (gainNode) gainNode.gain.value = v;
+            _saveTtsProviderSettings();
+        });
+        $('#qts_streaming').off('change').on('change', () => {
+            this.settings.streaming = $('#qts_streaming').is(':checked');
+            _saveTtsProviderSettings();
+        });
+
+        await this.checkReady();
+    }
+
+    // ── URL helpers ───────────────────────────────────────────────────────────
+
+    wsToHttpBase() {
+        return (this.settings.provider_endpoint || this.defaultSettings.provider_endpoint)
+            .replace(/^wss:\/\//, 'https://')
+            .replace(/^ws:\/\//, 'http://')
+            .replace(/\/ws\/.*$/,  '')
+            .replace(/\/+$/, '');
+    }
+
+    buildWsUrl(voiceId = null) {
+        const base   = (this.settings.provider_endpoint || this.defaultSettings.provider_endpoint)
+            .replace(/\/+$/, '');
+        const params = new URLSearchParams();
+        if (voiceId)                    params.set('speaker_wav', voiceId);
+        if (this.settings.language)     params.set('language', this.settings.language);
+        const qs = params.toString();
+        return qs ? `${base}?${qs}` : base;
+    }
+
+    // ── TTS provider interface ────────────────────────────────────────────────
+
+    async fetchTtsVoiceObjects() {
+        const base = this.wsToHttpBase();
+        if (!base) return [];
+        const resp = await fetch(`${base}/speakers`);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status} from ${base}/speakers`);
+        const data = await resp.json();
+        const toObj = (v) => typeof v === 'string'
+            ? { name: v, voice_id: v }
+            : { name: v.name ?? v.id ?? String(v), voice_id: v.name ?? v.id ?? String(v) };
+        this.voices = Array.isArray(data)
+            ? data.map(toObj)
+            : Object.keys(data).map(k => ({ name: k, voice_id: k }));
+        return this.voices;
+    }
+
+    async getVoice(voiceName) {
+        if (!this.voices.length) {
+            try { await this.fetchTtsVoiceObjects(); } catch { /**/ }
         }
-    } else if (ctx.name2) {
-        chars.push(ctx.name2);
+        const found = this.voices.find(v => v.name === voiceName || v.voice_id === voiceName);
+        if (!found) throw new Error(`Voice "${voiceName}" not found — check Provider Endpoint.`);
+        return found;
     }
 
-    if (chars.length === 0) {
-        block.append(
-            $('<small>').css({ color: '#666', fontStyle: 'italic' })
-                .text('Open a chat to see characters here.')
-        );
-        return;
+    async checkReady() {
+        try { await this.fetchTtsVoiceObjects(); } catch { /* offline is OK at load time */ }
     }
 
-    if (!s.voiceMap || typeof s.voiceMap !== 'object') s.voiceMap = {};
+    async onRefreshClick() {
+        await this.fetchTtsVoiceObjects();
+    }
 
-    for (const name of chars) {
-        const safeId       = `qts_voice_${encodeURIComponent(name).replace(/[^a-zA-Z0-9]/g, '_')}`;
-        const currentVoice = s.voiceMap[name] !== undefined ? s.voiceMap[name] : '';
+    /**
+     * Preview a voice — collect full audio from WS and play via Audio element.
+     * Using Audio element here (not our AudioContext streaming pipeline) so it
+     * doesn't interfere with ongoing generation audio.
+     */
+    async previewTtsVoice(voiceId) {
+        const text = _getPreviewString(this.settings.language);
+        const blob = await this._collectWsAudio(text, voiceId);
+        const url  = URL.createObjectURL(blob);
+        const audio = new Audio(url);
+        audio.volume = Math.min(1, this.settings.volume);
+        audio.onended = () => URL.revokeObjectURL(url);
+        audio.play().catch(e => console.warn(`[${EXT_NAME}] Preview play error:`, e));
+    }
 
-        const nameSpan = $('<span>')
-            .text(name)
-            .attr('title', name)
-            .css({ minWidth: '110px', flex: '0 0 auto', overflow: 'hidden',
-                   textOverflow: 'ellipsis', whiteSpace: 'nowrap' });
+    /**
+     * Generate TTS for the given text.  Returns a fetch Response containing WAV audio.
+     * ST uses this for: Narrate button, Auto-read aloud, message replay.
+     *
+     * When Real-time Streaming just played this message (within the last 8 s),
+     * return a silent WAV so auto-read-aloud does not double-play the same audio.
+     * The Narrate button on past messages always works because the 8 s window will
+     * have long expired by the time the user clicks it.
+     */
+    async generateTts(text, voiceId) {
+        if (this.settings.streaming && Date.now() - streamPlayedAt < 8_000) {
+            return new Response(silentWav(), { headers: { 'Content-Type': 'audio/wav' } });
+        }
+        const blob = await this._collectWsAudio(text, voiceId);
+        return new Response(blob, { headers: { 'Content-Type': 'audio/wav' } });
+    }
 
-        const select = $('<select>', { id: safeId, class: 'text_pole' })
-            .attr('data-charname', name)
-            .css('flex', '1');
-        buildVoiceSelect(select, voices, currentVoice, true);
+    /**
+     * Open a dedicated WS connection, send text + [END], collect all WAV chunks
+     * into a single Blob and resolve.  60-second safety timeout.
+     */
+    _collectWsAudio(text, voiceId = null) {
+        return new Promise((resolve, reject) => {
+            const chunks  = [];
+            const socket  = new WebSocket(this.buildWsUrl(voiceId));
+            socket.binaryType = 'arraybuffer';
 
-        const row = $('<div>', { class: 'flex-container flexGap5 alignItemsCenter' })
-            .css('margin-bottom', '6px')
-            .append(nameSpan, select);
-        block.append(row);
+            const timer = setTimeout(() => {
+                socket.close();
+                reject(new Error(`[${EXT_NAME}] generateTts timeout`));
+            }, 60_000);
 
-        select.on('change', function () {
-            const v = $(this).val();
-            if (!s.voiceMap || typeof s.voiceMap !== 'object') s.voiceMap = {};
-            if (v) {
-                s.voiceMap[name] = v;
-            } else {
-                delete s.voiceMap[name];
-            }
-            saveSettings();
+            socket.onopen    = () => { socket.send(text); socket.send('[END]'); };
+            socket.onmessage = (ev) => {
+                if (ev.data instanceof ArrayBuffer) chunks.push(ev.data);
+                else if (ev.data === '[DONE]') socket.close();
+            };
+            socket.onclose   = () => {
+                clearTimeout(timer);
+                const len    = chunks.reduce((s, c) => s + c.byteLength, 0);
+                const merged = new Uint8Array(len);
+                let off = 0;
+                for (const c of chunks) { merged.set(new Uint8Array(c), off); off += c.byteLength; }
+                resolve(new Blob([merged], { type: 'audio/wav' }));
+            };
+            socket.onerror = (e) => { clearTimeout(timer); reject(e); };
         });
     }
 }
 
-// ── Init ───────────────────────────────────────────────────────────────────────
+// ── Init ──────────────────────────────────────────────────────────────────────
 
 jQuery(async () => {
-    // Load settings HTML from the external file and inject into the ST settings panel.
-    // #extensions_settings = left column (system/functional extensions — correct for TTS).
-    const settingsHtml = await $.get(`${EXT_FOLDER}/settings.html`);
-    $('#extensions_settings').append(settingsHtml);
-    loadSettingsUI();
-    buildVoiceMapUI();
+    // Dynamic import — avoids hard dependency on ST internals at parse time
+    const {
+        registerTtsProvider,
+        getPreviewString,
+        saveTtsProviderSettings,
+    } = await import('/scripts/extensions/tts/index.js');
 
-    // Obtain eventSource and event_types through the stable getContext() API
-    // rather than importing them directly from internal ST modules.
+    _saveTtsProviderSettings = saveTtsProviderSettings;
+    _getPreviewString        = getPreviewString;
+
+    const provider = new QwenTtsStreamingProvider();
+    currentProvider = provider;
+
+    // Register with ST's TTS system — hooks up Narrate button, voice map UI,
+    // enable/disable toggle, voice preview, and the provider settings panel.
+    registerTtsProvider('Qwen3 TTS (Streaming)', provider);
+
+    // Hook generation events for real-time streaming
     const { eventSource, event_types } = SillyTavern.getContext();
-
-    // Register event listeners
     eventSource.on(event_types.GENERATION_STARTED,    onGenerationStarted);
     eventSource.on(event_types.STREAM_TOKEN_RECEIVED, onStreamToken);
-    eventSource.on(event_types.GENERATION_ENDED,      onGenerationEnded);  // normal finish
-    eventSource.on(event_types.GENERATION_STOPPED,    onGenerationStopped); // user abort
-    // NOTE: GENERATION_AFTER_COMMANDS fires after every generation (not only on abort)
-    // so it is intentionally NOT used here — it would send a second [END] every time.
+    eventSource.on(event_types.GENERATION_ENDED,      onGenerationEnded);
+    eventSource.on(event_types.GENERATION_STOPPED,    onGenerationStopped);
 
-    // Rebuild the per-character voice map UI whenever the active chat changes.
-    eventSource.on(event_types.CHAT_CHANGED, () => buildVoiceMapUI());
-
-    console.info(`[${EXT_NAME}] Extension loaded`);
+    console.info(`[${EXT_NAME}] Loaded — select "${EXT_NAME}" in Extensions → TTS panel`);
 });
