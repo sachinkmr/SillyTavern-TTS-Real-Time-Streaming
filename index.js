@@ -121,6 +121,10 @@ function onGenerationStarted() {
     stopAudio();
     ensureAudioContext();
 
+    // Re-run voiceCache preload every generation — settings may not have been
+    // ready yet at loadSettings time.
+    currentProvider._preloadVoiceCache();
+
     // Resolve per-character voice from ST's TTS voice map
     let voiceId = null;
     try {
