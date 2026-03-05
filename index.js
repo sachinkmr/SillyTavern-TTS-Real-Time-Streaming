@@ -180,6 +180,11 @@ class WsTtsStreamingProvider {
     settings = {};
     voices   = [];
 
+    constructor() {
+        // ST instantiates the provider class itself; keep module-level ref for streaming hooks.
+        currentProvider = this;
+    }
+
     defaultSettings = {
         provider_endpoint : 'ws://192.168.1.100:7860/ws/tts',
         language          : 'en',
@@ -468,12 +473,9 @@ jQuery(async () => {
         if (typeof getPreviewString === 'function')
             _getPreviewString = getPreviewString;
 
-        const provider = new WsTtsStreamingProvider();
-        currentProvider = provider;
-
-        // Register with ST's TTS system — hooks up Narrate button, voice map UI,
-        // enable/disable toggle, voice preview, and the provider settings panel.
-        registerTtsProvider('WS TTS (Streaming)', provider);
+        // Register the CLASS (not an instance) — ST calls new Provider() itself.
+        // currentProvider is set inside the constructor when ST instantiates it.
+        registerTtsProvider('WS TTS (Streaming)', WsTtsStreamingProvider);
 
         // Hook generation events for real-time streaming
         const { eventSource, event_types } = SillyTavern.getContext();
