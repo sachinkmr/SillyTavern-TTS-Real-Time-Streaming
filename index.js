@@ -318,8 +318,13 @@ class WsTtsStreamingProvider {
     }
 
     buildWsUrl(voiceId = null) {
-        const base   = (this.settings.provider_endpoint || this.defaultSettings.provider_endpoint)
+        let base = (this.settings.provider_endpoint || this.defaultSettings.provider_endpoint)
             .replace(/\/+$/, '');
+        // Auto-upgrade to wss:// when the page is served over HTTPS to avoid
+        // mixed-content browser blocks.
+        if (location.protocol === 'https:') {
+            base = base.replace(/^ws:\/\//, 'wss://');
+        }
         const params = new URLSearchParams();
         if (voiceId)                    params.set('speaker_wav', voiceId);
         if (this.settings.language)     params.set('language', this.settings.language);
@@ -348,10 +353,13 @@ class WsTtsStreamingProvider {
         if (!this.voices.length) {
             try { await this.fetchTtsVoiceObjects(); } catch { /**/ }
         }
+        console.debug(`[${EXT_NAME}] getVoice("${voiceName}") — cached voices:`, this.voices.map(v => v.name));
         const found = this.voices.find(v => v.name === voiceName || v.voice_id === voiceName);
         // If not in cached list (e.g. server was offline at load time), pass the name
         // through as-is — the server will validate it, not us.
-        return found ?? { name: voiceName, voice_id: voiceName };
+        const result = found ?? { name: voiceName, voice_id: voiceName };
+        console.debug(`[${EXT_NAME}] getVoice resolved →`, result);
+        return result;
     }
 
     async checkReady() {
@@ -432,7 +440,7 @@ class WsTtsStreamingProvider {
      * have long expired by the time the user clicks it.
      */
     async generateTts(text, voiceId) {
-        console.debug(`[${EXT_NAME}] generateTts voiceId="${voiceId}"`);
+        console.debug(`[${EXT_NAME}] generateTts voiceId="${voiceId}" text="${text.slice(0, 60)}"`);
         if (this.settings.streaming && Date.now() - streamPlayedAt < 8_000) {
             return new Response(silentWav(), { headers: { 'Content-Type': 'audio/wav' } });
         }
