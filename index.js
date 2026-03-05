@@ -34,6 +34,7 @@ let currentProvider  = null;
 // Populated after dynamic import of ST's TTS index
 let _saveTtsProviderSettings = () => {};
 let _getPreviewString        = () => 'Hello, this is a test of the text to speech voice.';
+let _sanitizeId              = (s) => s;  // identity fallback until TTS module loads
 
 // ── Audio helpers ─────────────────────────────────────────────────────────────
 
@@ -123,11 +124,12 @@ function onGenerationStarted() {
     try {
         const ctx      = SillyTavern.getContext();
         const charName = ctx.name2;
-        // ST stores the voice map at extension_settings.tts.voiceMap
         const ttsSettings = ctx.extensionSettings?.tts ?? {};
         const voiceMap    = ttsSettings.voiceMap ?? {};
-        console.debug(`[${EXT_NAME}] streaming voiceMap:`, voiceMap, `charName: "${charName}"`);
-        if (charName && voiceMap[charName]) voiceId = voiceMap[charName];
+        // ST keys the voice map by sanitizeId(characterName)
+        const key = _sanitizeId(charName);
+        console.debug(`[${EXT_NAME}] streaming charName="${charName}" key="${key}" voiceMap:`, voiceMap);
+        voiceId = voiceMap[key] ?? voiceMap[charName] ?? null;
         console.debug(`[${EXT_NAME}] streaming resolved voiceId: "${voiceId}"`);
     } catch (e) { console.warn(`[${EXT_NAME}] voiceMap error:`, e); }
 
@@ -528,7 +530,7 @@ jQuery(async () => {
 
         console.debug(`[${EXT_NAME}] TTS module exports:`, Object.keys(ttsModule));
 
-        const { registerTtsProvider, getPreviewString, saveTtsProviderSettings } = ttsModule;
+        const { registerTtsProvider, getPreviewString, saveTtsProviderSettings, sanitizeId } = ttsModule;
 
         if (typeof registerTtsProvider !== 'function') {
             throw new Error(
@@ -542,6 +544,8 @@ jQuery(async () => {
             _saveTtsProviderSettings = saveTtsProviderSettings;
         if (typeof getPreviewString === 'function')
             _getPreviewString = getPreviewString;
+        if (typeof sanitizeId === 'function')
+            _sanitizeId = sanitizeId;
 
         // Register the CLASS (not an instance) — ST calls new Provider() itself.
         // currentProvider is set inside the constructor when ST instantiates it.
