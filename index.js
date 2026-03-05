@@ -30,6 +30,7 @@ let lastSentLength   = 0;
 let isGenerating     = false;
 let streamPlayedAt   = 0;   // timestamp of last streaming session end (for dedup)
 let currentProvider  = null;
+const voiceCache     = {};  // charName → voiceId, populated from generateTts calls
 
 // Populated after dynamic import of ST's TTS index
 let _saveTtsProviderSettings = () => {};
@@ -125,13 +126,12 @@ function onGenerationStarted() {
         const ctx      = SillyTavern.getContext();
         const charName = ctx.name2;
         if (!charName) { openStreamWs(null); return; }
-        // extension_settings is the live global ST settings object;
-        // ctx.extensionSettings is a proxy that does not include TTS voiceMap.
-        const voiceMap = window.extension_settings?.tts?.voiceMap ?? {};
+        // Try window.extension_settings paths
+        const tts      = window.extension_settings?.tts ?? {};
+        const voiceMap = tts.voiceMap ?? {};
         const key      = _sanitizeId(charName);
-        console.debug(`[${EXT_NAME}] streaming charName="${charName}" key="${key}" voiceMap:`, voiceMap);
-        voiceId = voiceMap[key] ?? voiceMap[charName] ?? null;
-        console.debug(`[${EXT_NAME}] streaming resolved voiceId: "${voiceId}"`);
+        voiceId = voiceMap[key] ?? voiceMap[charName] ?? voiceCache[charName] ?? null;
+        console.debug(`[${EXT_NAME}] streaming charName="${charName}" key="${key}" voiceId="${voiceId}" voiceMap:`, voiceMap, 'tts settings:', tts);
     } catch (e) { console.warn(`[${EXT_NAME}] voiceMap error:`, e); }
 
     openStreamWs(voiceId);
@@ -447,6 +447,11 @@ class WsTtsStreamingProvider {
      * have long expired by the time the user clicks it.
      */
     async generateTts(text, voiceId) {
+        // Cache voiceId per character so the streaming path can use it
+        try {
+            const charName = SillyTavern.getContext().name2;
+            if (charName && voiceId) voiceCache[charName] = voiceId;
+        } catch { /**/ }
         console.debug(`[${EXT_NAME}] generateTts voiceId="${voiceId}" text="${text.slice(0, 60)}"`);
         if (this.settings.streaming && Date.now() - streamPlayedAt < 8_000) {
             return new Response(silentWav(), { headers: { 'Content-Type': 'audio/wav' } });
