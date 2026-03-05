@@ -349,8 +349,9 @@ class WsTtsStreamingProvider {
             try { await this.fetchTtsVoiceObjects(); } catch { /**/ }
         }
         const found = this.voices.find(v => v.name === voiceName || v.voice_id === voiceName);
-        if (!found) throw new Error(`Voice "${voiceName}" not found — check Provider Endpoint.`);
-        return found;
+        // If not in cached list (e.g. server was offline at load time), pass the name
+        // through as-is — the server will validate it, not us.
+        return found ?? { name: voiceName, voice_id: voiceName };
     }
 
     async checkReady() {
@@ -431,6 +432,7 @@ class WsTtsStreamingProvider {
      * have long expired by the time the user clicks it.
      */
     async generateTts(text, voiceId) {
+        console.debug(`[${EXT_NAME}] generateTts voiceId="${voiceId}"`);
         if (this.settings.streaming && Date.now() - streamPlayedAt < 8_000) {
             return new Response(silentWav(), { headers: { 'Content-Type': 'audio/wav' } });
         }
