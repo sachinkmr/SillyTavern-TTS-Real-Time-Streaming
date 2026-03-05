@@ -30,6 +30,7 @@ let lastSentLength   = 0;
 let isGenerating     = false;
 let streamPlayedAt   = 0;   // timestamp of last streaming session end (for dedup)
 let currentProvider  = null;
+let currentVoiceId   = null; // voiceId for the active streaming session
 const voiceCache     = {};  // charName → voiceId, populated from generateTts calls
 
 // Populated after dynamic import of ST's TTS index
@@ -141,6 +142,7 @@ function onGenerationStarted() {
         console.debug(`[${EXT_NAME}] streaming charName="${charName}" key="${key}" voiceId="${voiceId}" charMap:`, charMap);
     } catch (e) { console.warn(`[${EXT_NAME}] voiceMap error:`, e); }
 
+    currentVoiceId = voiceId;
     openStreamWs(voiceId);
 }
 
@@ -150,9 +152,9 @@ function onStreamToken(text) {
 
     if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
         console.warn(`[${EXT_NAME}] WS dropped — reconnecting`);
-        openStreamWs();
+        openStreamWs(currentVoiceId);
     }
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return; // still connecting — drop token
 
     const delta = text.slice(lastSentLength);
     if (!delta.length) return;
