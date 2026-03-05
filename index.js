@@ -447,29 +447,43 @@ class WsTtsStreamingProvider {
 // ── Init ──────────────────────────────────────────────────────────────────────
 
 jQuery(async () => {
-    // Dynamic import — avoids hard dependency on ST internals at parse time
-    const {
-        registerTtsProvider,
-        getPreviewString,
-        saveTtsProviderSettings,
-    } = await import('/scripts/extensions/tts/index.js');
+    try {
+        // Dynamic import — avoids hard dependency on ST internals at parse time
+        const ttsModule = await import('/scripts/extensions/tts/index.js');
 
-    _saveTtsProviderSettings = saveTtsProviderSettings;
-    _getPreviewString        = getPreviewString;
+        console.debug(`[${EXT_NAME}] TTS module exports:`, Object.keys(ttsModule));
 
-    const provider = new WsTtsStreamingProvider();
-    currentProvider = provider;
+        const { registerTtsProvider, getPreviewString, saveTtsProviderSettings } = ttsModule;
 
-    // Register with ST's TTS system — hooks up Narrate button, voice map UI,
-    // enable/disable toggle, voice preview, and the provider settings panel.
-    registerTtsProvider('WS TTS (Streaming)', provider);
+        if (typeof registerTtsProvider !== 'function') {
+            throw new Error(
+                `registerTtsProvider not found in TTS module. ` +
+                `Available exports: ${Object.keys(ttsModule).join(', ')}. ` +
+                `Make sure the built-in TTS extension is enabled in ST.`,
+            );
+        }
 
-    // Hook generation events for real-time streaming
-    const { eventSource, event_types } = SillyTavern.getContext();
-    eventSource.on(event_types.GENERATION_STARTED,    onGenerationStarted);
-    eventSource.on(event_types.STREAM_TOKEN_RECEIVED, onStreamToken);
-    eventSource.on(event_types.GENERATION_ENDED,      onGenerationEnded);
-    eventSource.on(event_types.GENERATION_STOPPED,    onGenerationStopped);
+        if (typeof saveTtsProviderSettings === 'function')
+            _saveTtsProviderSettings = saveTtsProviderSettings;
+        if (typeof getPreviewString === 'function')
+            _getPreviewString = getPreviewString;
 
-    console.info(`[${EXT_NAME}] v1.5.0 loaded — select "${EXT_NAME}" in Extensions → TTS panel`);
+        const provider = new WsTtsStreamingProvider();
+        currentProvider = provider;
+
+        // Register with ST's TTS system — hooks up Narrate button, voice map UI,
+        // enable/disable toggle, voice preview, and the provider settings panel.
+        registerTtsProvider('WS TTS (Streaming)', provider);
+
+        // Hook generation events for real-time streaming
+        const { eventSource, event_types } = SillyTavern.getContext();
+        eventSource.on(event_types.GENERATION_STARTED,    onGenerationStarted);
+        eventSource.on(event_types.STREAM_TOKEN_RECEIVED, onStreamToken);
+        eventSource.on(event_types.GENERATION_ENDED,      onGenerationEnded);
+        eventSource.on(event_types.GENERATION_STOPPED,    onGenerationStopped);
+
+        console.info(`[${EXT_NAME}] v1.5.0 loaded — select "${EXT_NAME}" in Extensions → TTS panel`);
+    } catch (err) {
+        console.error(`[${EXT_NAME}] Failed to initialise:`, err);
+    }
 });
