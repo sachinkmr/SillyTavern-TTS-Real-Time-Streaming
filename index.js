@@ -360,10 +360,15 @@ class WsTtsStreamingProvider {
         if (!this.voices.length) {
             try { await this.fetchTtsVoiceObjects(); } catch { /**/ }
         }
+        // ST calls getVoice(resolvedVoiceName) just before generateTts.
+        // Capture the character→voice mapping here so the streaming path has it
+        // from the very first generation.
+        try {
+            const charName = SillyTavern.getContext().name2;
+            if (charName && voiceName) voiceCache[charName] = voiceName;
+        } catch { /**/ }
         console.debug(`[${EXT_NAME}] getVoice("${voiceName}") — cached voices:`, this.voices.map(v => v.name));
-        const found = this.voices.find(v => v.name === voiceName || v.voice_id === voiceName);
-        // If not in cached list (e.g. server was offline at load time), pass the name
-        // through as-is — the server will validate it, not us.
+        const found  = this.voices.find(v => v.name === voiceName || v.voice_id === voiceName);
         const result = found ?? { name: voiceName, voice_id: voiceName };
         console.debug(`[${EXT_NAME}] getVoice resolved →`, result);
         return result;
@@ -447,11 +452,6 @@ class WsTtsStreamingProvider {
      * have long expired by the time the user clicks it.
      */
     async generateTts(text, voiceId) {
-        // Cache voiceId per character so the streaming path can use it
-        try {
-            const charName = SillyTavern.getContext().name2;
-            if (charName && voiceId) voiceCache[charName] = voiceId;
-        } catch { /**/ }
         console.debug(`[${EXT_NAME}] generateTts voiceId="${voiceId}" text="${text.slice(0, 60)}"`);
         if (this.settings.streaming && Date.now() - streamPlayedAt < 8_000) {
             return new Response(silentWav(), { headers: { 'Content-Type': 'audio/wav' } });
