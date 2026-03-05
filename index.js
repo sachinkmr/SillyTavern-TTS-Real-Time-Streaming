@@ -81,7 +81,10 @@ function stopAudio() {
 
 function openStreamWs(voiceId = null) {
     if (!currentProvider) return;
-    if (ws && ws.readyState === WebSocket.OPEN) return;
+    // If the correct WS URL is already open, reuse it.
+    const targetUrl = currentProvider.buildWsUrl(voiceId);
+    if (ws && ws.readyState === WebSocket.OPEN && ws.url === targetUrl) return;
+    // Otherwise close any existing connection and open a fresh one.
     closeStreamWs();
 
     const url = currentProvider.buildWsUrl(voiceId);
