@@ -318,17 +318,21 @@ class WsTtsStreamingProvider {
     /** Parse power_user.tts_voicemap into voiceCache so streaming has voices from the first generation. */
     _preloadVoiceCache() {
         try {
-            const pu = window.power_user;
-            const raw = pu?.tts_voicemap ?? '';
-            console.debug(`[${EXT_NAME}] tts_voicemap raw:`, raw, 'power_user keys:', pu ? Object.keys(pu).filter(k => k.includes('tts')) : 'N/A');
-            if (raw) {
-                for (const pair of raw.split('|')) {
-                    const idx = pair.indexOf(':');
-                    if (idx === -1) continue;
-                    const char  = pair.slice(0, idx).trim();
-                    const voice = pair.slice(idx + 1).trim();
-                    if (char && voice) voiceCache[char] = voice;
-                }
+            // Dump all candidate locations so we can find where ST stores the voice map
+            const es  = window.extension_settings ?? {};
+            const tts = es.tts ?? {};
+            console.debug(`[${EXT_NAME}] extension_settings.tts:`, JSON.stringify(tts).slice(0, 500));
+            console.debug(`[${EXT_NAME}] extension_settings keys:`, Object.keys(es));
+            // Try every plausible path
+            const voiceMap =
+                tts.voiceMap ??
+                tts.voice_map ??
+                tts.voices ??
+                tts.character_voices ??
+                {};
+            console.debug(`[${EXT_NAME}] voiceMap candidate:`, voiceMap);
+            for (const [char, voice] of Object.entries(voiceMap)) {
+                if (char && voice) voiceCache[char] = voice;
             }
             console.debug(`[${EXT_NAME}] voiceCache preloaded:`, { ...voiceCache });
         } catch (e) { console.warn(`[${EXT_NAME}] voiceCache preload error:`, e); }
