@@ -1,5 +1,5 @@
 /**
- * WebSocket TTS — Real-Time Streaming  (v1.5.0)
+ * WebSocket TTS — Real-Time Streaming  (v1.5.1)
  * SillyTavern Extension
  *
  * Registers as a proper ST TTS provider — gives the Narrate button,
@@ -171,6 +171,28 @@ function silentWav() {
     v.setUint16(32, 2, true); v.setUint16(34, 16, true);
     w('data', 36); v.setUint32(40, 2, true); v.setInt16(44, 0, true);
     return b;
+}
+
+/**
+ * Encode a Float32 mono PCM array as a 16-bit PCM WAV ArrayBuffer.
+ * Used to merge multiple per-sentence WAV chunks into one playable blob.
+ */
+function _encodeWav(samples, sampleRate) {
+    const buf  = new ArrayBuffer(44 + samples.length * 2);
+    const view = new DataView(buf);
+    const ws   = (off, s) => { for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i)); };
+    ws(0, 'RIFF'); view.setUint32(4, 36 + samples.length * 2, true);
+    ws(8, 'WAVE'); ws(12, 'fmt '); view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);             // PCM
+    view.setUint16(22, 1, true);             // mono
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * 2, true); // byteRate
+    view.setUint16(32, 2, true);             // blockAlign
+    view.setUint16(34, 16, true);            // bitsPerSample
+    ws(36, 'data'); view.setUint32(40, samples.length * 2, true);
+    for (let i = 0; i < samples.length; i++)
+        view.setInt16(44 + i * 2, Math.max(-1, Math.min(1, samples[i])) * 0x7FFF, true);
+    return buf;
 }
 
 // ── Provider class ─────────────────────────────────────────────────────────────
@@ -417,12 +439,18 @@ class WsTtsStreamingProvider {
     }
 
     /**
-     * Open a dedicated WS connection, send text + [END], collect all WAV chunks
-     * into a single Blob and resolve.  60-second safety timeout.
+     * Open a dedicated WS connection, send text + [END], collect all WAV chunks,
+     * decode each one via AudioContext, merge the PCM samples, and resolve with
+     * a single well-formed WAV Blob.
+     *
+     * The server sends one WAV file per sentence.  Naively byte-concatenating
+     * multiple WAV files produces a blob with multiple RIFF headers — browsers
+     * only decode up to the first one, so only the first sentence would play.
+     * Decoding + re-encoding ensures the full reply is audible.
      */
     _collectWsAudio(text, voiceId = null) {
         return new Promise((resolve, reject) => {
-            const chunks  = [];
+            const decodePromises = [];
             const socket  = new WebSocket(this.buildWsUrl(voiceId));
             socket.binaryType = 'arraybuffer';
 
@@ -433,16 +461,44 @@ class WsTtsStreamingProvider {
 
             socket.onopen    = () => { socket.send(text); socket.send('[END]'); };
             socket.onmessage = (ev) => {
-                if (ev.data instanceof ArrayBuffer) chunks.push(ev.data);
-                else if (ev.data === '[DONE]') socket.close();
+                if (ev.data instanceof ArrayBuffer) {
+                    // Decode each WAV chunk into PCM now — the close handler
+                    // awaits all promises before merging.
+                    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+                    decodePromises.push(
+                        ctx.decodeAudioData(ev.data.slice(0))
+                            .then(buf  => { ctx.close(); return buf; })
+                            .catch(err => { ctx.close();
+                                console.warn(`[${EXT_NAME}] chunk decode error:`, err);
+                                return null; }),
+                    );
+                } else if (ev.data === '[DONE]') socket.close();
             };
-            socket.onclose   = () => {
+            socket.onclose = async () => {
                 clearTimeout(timer);
-                const len    = chunks.reduce((s, c) => s + c.byteLength, 0);
-                const merged = new Uint8Array(len);
+                const audioBuffers = (await Promise.all(decodePromises)).filter(Boolean);
+                if (!audioBuffers.length) {
+                    resolve(new Blob([silentWav()], { type: 'audio/wav' }));
+                    return;
+                }
+                // Merge all decoded AudioBuffers → one Float32 array → one WAV
+                const sr       = audioBuffers[0].sampleRate;
+                const totalLen = audioBuffers.reduce((s, b) => s + b.length, 0);
+                const merged   = new Float32Array(totalLen);
                 let off = 0;
-                for (const c of chunks) { merged.set(new Uint8Array(c), off); off += c.byteLength; }
-                resolve(new Blob([merged], { type: 'audio/wav' }));
+                for (const b of audioBuffers) {
+                    // Mix down to mono in case the model ever produces stereo
+                    const ch0 = b.getChannelData(0);
+                    if (b.numberOfChannels > 1) {
+                        const ch1 = b.getChannelData(1);
+                        for (let i = 0; i < ch0.length; i++)
+                            merged[off + i] = (ch0[i] + ch1[i]) / 2;
+                    } else {
+                        merged.set(ch0, off);
+                    }
+                    off += b.length;
+                }
+                resolve(new Blob([_encodeWav(merged, sr)], { type: 'audio/wav' }));
             };
             socket.onerror = (e) => { clearTimeout(timer); reject(e); };
         });
@@ -484,7 +540,7 @@ jQuery(async () => {
         eventSource.on(event_types.GENERATION_ENDED,      onGenerationEnded);
         eventSource.on(event_types.GENERATION_STOPPED,    onGenerationStopped);
 
-        console.info(`[${EXT_NAME}] v1.5.0 loaded — select "${EXT_NAME}" in Extensions → TTS panel`);
+        console.info(`[${EXT_NAME}] v1.5.1 loaded — select "${EXT_NAME}" in Extensions → TTS panel`);
     } catch (err) {
         console.error(`[${EXT_NAME}] Failed to initialise:`, err);
     }
