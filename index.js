@@ -139,7 +139,6 @@ function onGenerationStarted() {
         const charMap = _getCharacters();
         const key     = _sanitizeId(charName);
         voiceId = charMap[key] ?? charMap[charName] ?? voiceCache[charName] ?? null;
-        console.debug(`[${EXT_NAME}] streaming charName="${charName}" key="${key}" voiceId="${voiceId}" charMap:`, charMap);
     } catch (e) { console.warn(`[${EXT_NAME}] voiceMap error:`, e); }
 
     currentVoiceId = voiceId;
@@ -327,21 +326,15 @@ class WsTtsStreamingProvider {
     /** Populate voiceCache from the per-provider TTS voiceMap stored in extensionSettings. */
     _preloadVoiceCache() {
         try {
-            const ctx       = SillyTavern.getContext();
-            const tts       = ctx.extensionSettings?.tts ?? {};
-            // Voice map lives under the provider's own key, not at tts.voiceMap
-            const providerSettings = tts[EXT_NAME] ?? {};
-            const voiceMap  = providerSettings.voiceMap ?? {};
-            console.debug(`[${EXT_NAME}] provider voiceMap:`, voiceMap);
-            // Keys are formatted as: "CharName (\"Quotes\")", "CharName (*Text inside asterisks*)", etc.
-            // Extract character name (everything before the last ' (') and pick first non-disabled voice.
+            const ctx      = SillyTavern.getContext();
+            const tts      = ctx.extensionSettings?.tts ?? {};
+            const voiceMap = (tts[EXT_NAME] ?? {}).voiceMap ?? {};
             for (const [key, voice] of Object.entries(voiceMap)) {
                 if (!voice || voice === 'disabled' || voice === '[Default Voice]') continue;
                 const match = key.match(/^(.+?)\s+\(/);
                 const char  = match ? match[1].trim() : key;
                 if (char && !voiceCache[char]) voiceCache[char] = voice;
             }
-            console.debug(`[${EXT_NAME}] voiceCache preloaded:`, { ...voiceCache });
         } catch (e) { console.warn(`[${EXT_NAME}] voiceCache preload error:`, e); }
     }
 
@@ -392,17 +385,13 @@ class WsTtsStreamingProvider {
             try { await this.fetchTtsVoiceObjects(); } catch { /**/ }
         }
         // ST calls getVoice(resolvedVoiceName) just before generateTts.
-        // Capture the character→voice mapping here so the streaming path has it
-        // from the very first generation.
+        // Capture the character→voice mapping here so the streaming path has it.
         try {
             const charName = SillyTavern.getContext().name2;
             if (charName && voiceName) voiceCache[charName] = voiceName;
         } catch { /**/ }
-        console.debug(`[${EXT_NAME}] getVoice("${voiceName}") — cached voices:`, this.voices.map(v => v.name));
         const found  = this.voices.find(v => v.name === voiceName || v.voice_id === voiceName);
-        const result = found ?? { name: voiceName, voice_id: voiceName };
-        console.debug(`[${EXT_NAME}] getVoice resolved →`, result);
-        return result;
+        return found ?? { name: voiceName, voice_id: voiceName };
     }
 
     async checkReady() {
@@ -483,7 +472,6 @@ class WsTtsStreamingProvider {
      * have long expired by the time the user clicks it.
      */
     async generateTts(text, voiceId) {
-        console.debug(`[${EXT_NAME}] generateTts voiceId="${voiceId}" text="${text.slice(0, 60)}"`);
         if (this.settings.streaming && Date.now() - streamPlayedAt < 8_000) {
             return new Response(silentWav(), { headers: { 'Content-Type': 'audio/wav' } });
         }
