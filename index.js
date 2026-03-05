@@ -36,6 +36,7 @@ const voiceCache     = {};  // charName → voiceId, populated from generateTts 
 let _saveTtsProviderSettings = () => {};
 let _getPreviewString        = () => 'Hello, this is a test of the text to speech voice.';
 let _sanitizeId              = (s) => s;  // identity fallback until TTS module loads
+let _getCharacters           = () => ({});  // returns char→voice map
 
 // ── Audio helpers ─────────────────────────────────────────────────────────────
 
@@ -126,12 +127,11 @@ function onGenerationStarted() {
         const ctx      = SillyTavern.getContext();
         const charName = ctx.name2;
         if (!charName) { openStreamWs(null); return; }
-        // Try window.extension_settings paths
-        const tts      = window.extension_settings?.tts ?? {};
-        const voiceMap = tts.voiceMap ?? {};
-        const key      = _sanitizeId(charName);
-        voiceId = voiceMap[key] ?? voiceMap[charName] ?? voiceCache[charName] ?? null;
-        console.debug(`[${EXT_NAME}] streaming charName="${charName}" key="${key}" voiceId="${voiceId}" voiceMap:`, voiceMap, 'tts settings:', tts);
+        // getCharacters() returns the live char→voice map from ST's TTS system
+        const charMap = _getCharacters();
+        const key     = _sanitizeId(charName);
+        voiceId = charMap[key] ?? charMap[charName] ?? voiceCache[charName] ?? null;
+        console.debug(`[${EXT_NAME}] streaming charName="${charName}" key="${key}" voiceId="${voiceId}" charMap:`, charMap);
     } catch (e) { console.warn(`[${EXT_NAME}] voiceMap error:`, e); }
 
     openStreamWs(voiceId);
@@ -536,7 +536,7 @@ jQuery(async () => {
 
         console.debug(`[${EXT_NAME}] TTS module exports:`, Object.keys(ttsModule));
 
-        const { registerTtsProvider, getPreviewString, saveTtsProviderSettings, sanitizeId } = ttsModule;
+        const { registerTtsProvider, getPreviewString, saveTtsProviderSettings, sanitizeId, getCharacters } = ttsModule;
 
         if (typeof registerTtsProvider !== 'function') {
             throw new Error(
@@ -552,6 +552,8 @@ jQuery(async () => {
             _getPreviewString = getPreviewString;
         if (typeof sanitizeId === 'function')
             _sanitizeId = sanitizeId;
+        if (typeof getCharacters === 'function')
+            _getCharacters = getCharacters;
 
         // Register the CLASS (not an instance) — ST calls new Provider() itself.
         // currentProvider is set inside the constructor when ST instantiates it.
