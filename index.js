@@ -1,5 +1,5 @@
 /**
- * WebSocket TTS — Real-Time Streaming  (v1.4.0)
+ * WebSocket TTS — Real-Time Streaming  (v1.5.0)
  * SillyTavern Extension
  *
  * Registers as a proper ST TTS provider — gives the Narrate button,
@@ -328,10 +328,55 @@ class WsTtsStreamingProvider {
 
     async checkReady() {
         try { await this.fetchTtsVoiceObjects(); } catch { /* offline is OK at load time */ }
+        try { await this.fetchTtsLanguages(); }   catch { /* optional endpoint */ }
     }
 
     async onRefreshClick() {
         await this.fetchTtsVoiceObjects();
+        try { await this.fetchTtsLanguages(); } catch { /**/ }
+    }
+
+    /**
+     * Optionally fetch supported languages from GET /languages.
+     * Falls back silently to the hardcoded languageLabels list if the
+     * endpoint does not exist (404) or the server is unreachable.
+     *
+     * Accepted response formats:
+     *   ["en", "zh", "ja"]                                  ← code array
+     *   [{"code": "en", "name": "English"}, ...]            ← object array
+     *   {"en": "English", "zh": "Chinese", ...}             ← code→name map
+     */
+    async fetchTtsLanguages() {
+        const base = this.wsToHttpBase();
+        if (!base) return;
+        let resp;
+        try { resp = await fetch(`${base}/languages`); } catch { return; }
+        if (!resp.ok) return;   // 404 — endpoint not implemented, keep hardcoded list
+
+        const data = await resp.json();
+        let langs;
+        if (Array.isArray(data)) {
+            langs = data.map(v => typeof v === 'string'
+                ? { code: v, name: this.languageLabels[v] ?? v }
+                : { code: v.code ?? v.id ?? String(v), name: v.name ?? v.label ?? v.code ?? String(v) });
+        } else {
+            langs = Object.entries(data).map(([code, val]) => ({
+                code,
+                name: typeof val === 'string' ? val : (this.languageLabels[code] ?? code),
+            }));
+        }
+        if (langs.length) this._buildLanguageSelect(langs);
+    }
+
+    /** Rebuild the language <select> from a dynamic list. */
+    _buildLanguageSelect(langs) {
+        const $sel = $('#wts_language');
+        if (!$sel.length) return;
+        const current = this.settings.language || this.defaultSettings.language;
+        $sel.empty();
+        for (const { code, name } of langs) {
+            $sel.append($('<option>').val(code).text(name).prop('selected', code === current));
+        }
     }
 
     /**
@@ -426,5 +471,5 @@ jQuery(async () => {
     eventSource.on(event_types.GENERATION_ENDED,      onGenerationEnded);
     eventSource.on(event_types.GENERATION_STOPPED,    onGenerationStopped);
 
-    console.info(`[${EXT_NAME}] v1.4.0 loaded — select "${EXT_NAME}" in Extensions → TTS panel`);
+    console.info(`[${EXT_NAME}] v1.5.0 loaded — select "${EXT_NAME}" in Extensions → TTS panel`);
 });

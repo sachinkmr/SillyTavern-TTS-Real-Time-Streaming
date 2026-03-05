@@ -115,7 +115,30 @@ Server → "[DONE]"
 
 ---
 
-### `GET /speakers` — called by `generateTts` (Narrate / message replay)
+### `GET /languages` *(optional)*
+
+Returns the list of languages supported by this server/model.  
+If this endpoint is absent (returns 404 or connection error), the extension silently falls back to its built-in list of 12 languages.
+
+**Response — any of these formats are accepted:**
+
+```json
+["en", "zh", "ja", "ko"]
+```
+
+```json
+[{"code": "en", "name": "English"}, {"code": "zh", "name": "Chinese"}]
+```
+
+```json
+{"en": "English", "zh": "Chinese", "ja": "Japanese"}
+```
+
+Language codes are passed as the `language` query parameter on `WS /ws/tts` connections.
+
+---
+
+### Narrate / message replay
 
 For non-streaming use (Narrate button, message replay), the extension opens a **separate** dedicated WebSocket connection per request, sends the **full text** at once followed by `[END]`, waits for all WAV chunks plus `[DONE]`, then reassembles them into a single WAV blob for ST's audio system.
 
@@ -156,5 +179,6 @@ If the server runs on a different host/port, ensure it does not reject WebSocket
 |---|---|---|---|
 | `GET /speakers` | HTTP | ✅ Yes | Populate voice dropdown; called on load and refresh |
 | `WS /ws/tts` | WebSocket | ✅ Yes | Real-time streaming TTS + Narrate / replay |
+| `GET /languages` | HTTP | ❌ Optional | Populate language dropdown dynamically |
 
 No other endpoints are used.
