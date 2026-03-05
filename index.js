@@ -124,10 +124,11 @@ function onGenerationStarted() {
     try {
         const ctx      = SillyTavern.getContext();
         const charName = ctx.name2;
-        const ttsSettings = ctx.extensionSettings?.tts ?? {};
-        const voiceMap    = ttsSettings.voiceMap ?? {};
-        // ST keys the voice map by sanitizeId(characterName)
-        const key = _sanitizeId(charName);
+        if (!charName) { openStreamWs(null); return; }
+        // extension_settings is the live global ST settings object;
+        // ctx.extensionSettings is a proxy that does not include TTS voiceMap.
+        const voiceMap = window.extension_settings?.tts?.voiceMap ?? {};
+        const key      = _sanitizeId(charName);
         console.debug(`[${EXT_NAME}] streaming charName="${charName}" key="${key}" voiceMap:`, voiceMap);
         voiceId = voiceMap[key] ?? voiceMap[charName] ?? null;
         console.debug(`[${EXT_NAME}] streaming resolved voiceId: "${voiceId}"`);
