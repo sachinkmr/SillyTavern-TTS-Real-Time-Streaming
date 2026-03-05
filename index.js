@@ -25,7 +25,8 @@ const DEFAULT_SETTINGS = Object.freeze({
     speaker_wav: '',
     language: 'en',
     volume: 1.0,
-    voiceMap: {},   // { characterName: speaker_wav } — per-character voice override
+    available_voices: [],  // voice IDs fetched from server or entered manually
+    voiceMap: {},          // { characterName: speaker_wav | '__disabled__' } — per-character override
 });
 
 // ── State ──────────────────────────────────────────────────────────────────────
@@ -181,6 +182,82 @@ function closeWs(sendEnd = false) {
     }
 }
 
+// ── Voice helpers ─────────────────────────────────────────────────────────────
+
+/**
+ * Convert a ws:// or wss:// endpoint URL to an http:// base URL for REST calls.
+ * e.g. ws://192.168.1.100:7860/ws/tts → http://192.168.1.100:7860
+ */
+function wsToHttpBase(wsUrl) {
+    return wsUrl
+        .replace(/^wss:\/\//, 'https://')
+        .replace(/^ws:\/\//, 'http://')
+        .replace(/\/ws\/.*$/, '')
+        .replace(/\/+$/, '');
+}
+
+/**
+ * Fetch the available voice list from the server's /speakers endpoint.
+ * Updates settings and refreshes all voice selects on success.
+ */
+async function fetchVoices() {
+    const s = getSettings();
+    const base = wsToHttpBase(s.ws_endpoint);
+    const statusEl = $('#qts_voices_status');
+    statusEl.text('Fetching…');
+    try {
+        const resp = await fetch(`${base}/speakers`);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        // Server may return: string[], {name}[], or {id: name} object
+        const voices = Array.isArray(data)
+            ? data.map(v => (typeof v === 'string' ? v : (v.name || v.id || String(v))))
+            : Object.keys(data);
+        s.available_voices = voices.filter(Boolean);
+        $('#qts_available_voices').val(s.available_voices.join(', '));
+        refreshAllVoiceSelects();
+        saveSettings();
+        statusEl.text(`✓ ${voices.length} voice${voices.length !== 1 ? 's' : ''}`);
+        setTimeout(() => statusEl.text(''), 3000);
+    } catch (e) {
+        statusEl.text(`✗ ${e.message}`);
+        setTimeout(() => statusEl.text(''), 5000);
+    }
+}
+
+/**
+ * Populate a <select> element with voice options.
+ * @param {JQuery} sel          - the <select> jQuery element
+ * @param {string[]} voices     - list of voice IDs
+ * @param {string} currentVal   - the currently saved value
+ * @param {boolean} forCharMap  - true = include "(Disabled)" option
+ */
+function buildVoiceSelect(sel, voices, currentVal, forCharMap = false) {
+    sel.empty();
+    sel.append($('<option>', { value: '',             text: forCharMap ? '(Use Global Default)' : '(Server Default)' }));
+    if (forCharMap) {
+        sel.append($('<option>', { value: '__disabled__', text: '(Disabled — skip this character)' }));
+    }
+    for (const v of voices) {
+        sel.append($('<option>', { value: v, text: v }));
+    }
+    sel.val(currentVal || '');
+}
+
+/**
+ * Rebuild the global speaker <select> and all per-character <select>s
+ * whenever the available_voices list changes.
+ */
+function refreshAllVoiceSelects() {
+    const s = getSettings();
+    const voices = s.available_voices || [];
+    buildVoiceSelect($('#qts_speaker'), voices, s.speaker_wav, false);
+    $('#qts_voicemap_block select[data-charname]').each(function () {
+        const name = $(this).data('charname');
+        buildVoiceSelect($(this), voices, (s.voiceMap || {})[name] || '', true);
+    });
+}
+
 // ── ST Event hooks ─────────────────────────────────────────────────────────────
 
 /**
@@ -227,8 +304,14 @@ function onGenerationStarted() {
         const ctx = SillyTavern.getContext();
         const charName = ctx.name2; // active character name in current chat
         if (charName && s.voiceMap && charName in s.voiceMap) {
-            // voiceMap[name] === '' means "use default" (user cleared it)
-            speakerOverride = s.voiceMap[charName] || null;
+            const mapped = s.voiceMap[charName];
+            if (mapped === '__disabled__') {
+                // TTS is explicitly disabled for this character — abort generation
+                isGenerating = false;
+                stopAudio();
+                return;
+            }
+            speakerOverride = mapped || null; // '' means use global default
         }
     } catch (e) {
         console.warn(`[${EXT_NAME}] Could not resolve character voice:`, e);
@@ -259,11 +342,16 @@ function loadSettingsUI() {
 
     $('#qts_enabled').prop('checked', s.enabled);
     $('#qts_ws_endpoint').val(s.ws_endpoint);
-    $('#qts_speaker').val(s.speaker_wav);
     $('#qts_language').val(s.language);
     $('#qts_volume').val(s.volume);
     $('#qts_volume_counter').val(s.volume);
     $('#qts_volume_label').text(Number(s.volume).toFixed(2));
+
+    // Populate available-voices text field
+    $('#qts_available_voices').val((s.available_voices || []).join(', '));
+
+    // Populate global speaker <select> from saved voice list
+    buildVoiceSelect($('#qts_speaker'), s.available_voices || [], s.speaker_wav, false);
 
     // Guard against handler stacking if ST re-renders the extensions panel
     $('#qts_enabled').off('change').on('change', function () {
@@ -276,13 +364,26 @@ function loadSettingsUI() {
         saveSettings();
     });
 
-    $('#qts_speaker').off('input').on('input', function () {
-        getSettings().speaker_wav = $(this).val().trim();
+    // Available voices: parse comma-separated text → array, then refresh all selects
+    $('#qts_available_voices').off('input').on('input', function () {
+        const voices = $(this).val().split(',').map(v => v.trim()).filter(Boolean);
+        getSettings().available_voices = voices;
+        refreshAllVoiceSelects();
         saveSettings();
     });
 
-    $('#qts_language').off('input').on('input', function () {
-        getSettings().language = $(this).val().trim() || 'en';
+    // Fetch voices button
+    $('#qts_fetch_voices_btn').off('click').on('click', fetchVoices);
+
+    // Speaker / Voice ID — now a <select>
+    $('#qts_speaker').off('change').on('change', function () {
+        getSettings().speaker_wav = $(this).val();
+        saveSettings();
+    });
+
+    // Language — now a <select>
+    $('#qts_language').off('change').on('change', function () {
+        getSettings().language = $(this).val();
         saveSettings();
     });
 
@@ -366,8 +467,9 @@ function buildVoiceMapUI() {
     if (!block.length) return;
     block.empty();
 
-    const s   = getSettings();
-    const ctx = SillyTavern.getContext();
+    const s      = getSettings();
+    const ctx    = SillyTavern.getContext();
+    const voices = s.available_voices || [];
 
     // Collect character names visible in the current chat
     const chars = [];
@@ -384,37 +486,37 @@ function buildVoiceMapUI() {
     }
 
     if (chars.length === 0) {
-        block.html('<small style="color:#666;font-style:italic">Open a chat to see characters here.</small>');
+        block.append(
+            $('<small>').css({ color: '#666', fontStyle: 'italic' })
+                .text('Open a chat to see characters here.')
+        );
         return;
     }
 
-    if (!s.voiceMap || typeof s.voiceMap !== 'object') {
-        s.voiceMap = {};
-    }
+    if (!s.voiceMap || typeof s.voiceMap !== 'object') s.voiceMap = {};
 
     for (const name of chars) {
-        // Build a DOM-safe id from the character name
         const safeId       = `qts_voice_${encodeURIComponent(name).replace(/[^a-zA-Z0-9]/g, '_')}`;
-        const currentVoice = (s.voiceMap[name] !== undefined) ? s.voiceMap[name] : '';
+        const currentVoice = s.voiceMap[name] !== undefined ? s.voiceMap[name] : '';
 
-        // Build the row via jQuery DOM construction — never interpolate user content into
-        // raw HTML strings (XSS risk if a character name contains < > " etc.).
         const nameSpan = $('<span>')
-            .text(name)          // .text() escapes HTML automatically
+            .text(name)
             .attr('title', name)
             .css({ minWidth: '110px', flex: '0 0 auto', overflow: 'hidden',
                    textOverflow: 'ellipsis', whiteSpace: 'nowrap' });
-        const input = $('<input>', {
-            type: 'text', id: safeId, class: 'text_pole',
-            placeholder: '(use default)', value: currentVoice,
-        }).css('flex', '1');
+
+        const select = $('<select>', { id: safeId, class: 'text_pole' })
+            .attr('data-charname', name)
+            .css('flex', '1');
+        buildVoiceSelect(select, voices, currentVoice, true);
+
         const row = $('<div>', { class: 'flex-container flexGap5 alignItemsCenter' })
             .css('margin-bottom', '6px')
-            .append(nameSpan, input);
+            .append(nameSpan, select);
         block.append(row);
 
-        $(`#${safeId}`).off('input').on('input', function () {
-            const v = $(this).val().trim();
+        select.on('change', function () {
+            const v = $(this).val();
             if (!s.voiceMap || typeof s.voiceMap !== 'object') s.voiceMap = {};
             if (v) {
                 s.voiceMap[name] = v;
