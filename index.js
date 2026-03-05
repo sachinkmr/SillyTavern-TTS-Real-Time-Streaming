@@ -122,7 +122,16 @@ function onGenerationStarted() {
     isGenerating   = true;
     lastSentLength = 0;
     streamPlayedAt = 0;
-    stopAudio();
+
+    // If a previous character's audio is still scheduled in the AudioContext,
+    // don't destroy it — let it play out.  B's chunks will be queued after A's
+    // because nextStartTime already points past the end of A's audio.
+    // Only reset when the queue is empty (normal restart / regenerate case).
+    const audioStillQueued = audioCtx
+        && audioCtx.state !== 'closed'
+        && nextStartTime > audioCtx.currentTime + 0.3;
+    if (!audioStillQueued) stopAudio();
+
     ensureAudioContext();
 
     // Re-run voiceCache preload every generation — settings may not have been
