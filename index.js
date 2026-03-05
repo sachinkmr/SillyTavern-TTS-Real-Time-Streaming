@@ -319,22 +319,23 @@ class WsTtsStreamingProvider {
         this._preloadVoiceCache();
     }
 
-    /** Parse power_user.tts_voicemap into voiceCache so streaming has voices from the first generation. */
+    /** Parse voice map into voiceCache so streaming has voices from the first generation. */
     _preloadVoiceCache() {
         try {
-            // Dump all candidate locations so we can find where ST stores the voice map
-            const es  = window.extension_settings ?? {};
+            const ctx = SillyTavern.getContext();
+            // Log ALL context keys to find where the voiceMap lives
+            console.debug(`[${EXT_NAME}] ctx keys:`, Object.keys(ctx));
+            const es = ctx.extensionSettings ?? {};
+            console.debug(`[${EXT_NAME}] ctx.extensionSettings keys:`, Object.keys(es));
             const tts = es.tts ?? {};
-            console.debug(`[${EXT_NAME}] extension_settings.tts:`, JSON.stringify(tts).slice(0, 500));
-            console.debug(`[${EXT_NAME}] extension_settings keys:`, Object.keys(es));
-            // Try every plausible path
+            console.debug(`[${EXT_NAME}] ctx.extensionSettings.tts:`, JSON.stringify(tts).slice(0, 500));
+            // Try every plausible location
             const voiceMap =
                 tts.voiceMap ??
                 tts.voice_map ??
                 tts.voices ??
                 tts.character_voices ??
                 {};
-            console.debug(`[${EXT_NAME}] voiceMap candidate:`, voiceMap);
             for (const [char, voice] of Object.entries(voiceMap)) {
                 if (char && voice) voiceCache[char] = voice;
             }
