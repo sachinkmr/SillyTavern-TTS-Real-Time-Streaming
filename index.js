@@ -319,25 +319,22 @@ class WsTtsStreamingProvider {
         this._preloadVoiceCache();
     }
 
-    /** Parse voice map into voiceCache so streaming has voices from the first generation. */
+    /** Populate voiceCache from the per-provider TTS voiceMap stored in extensionSettings. */
     _preloadVoiceCache() {
         try {
-            const ctx = SillyTavern.getContext();
-            // Log ALL context keys to find where the voiceMap lives
-            console.debug(`[${EXT_NAME}] ctx keys:`, Object.keys(ctx));
-            const es = ctx.extensionSettings ?? {};
-            console.debug(`[${EXT_NAME}] ctx.extensionSettings keys:`, Object.keys(es));
-            const tts = es.tts ?? {};
-            console.debug(`[${EXT_NAME}] ctx.extensionSettings.tts:`, JSON.stringify(tts).slice(0, 500));
-            // Try every plausible location
-            const voiceMap =
-                tts.voiceMap ??
-                tts.voice_map ??
-                tts.voices ??
-                tts.character_voices ??
-                {};
-            for (const [char, voice] of Object.entries(voiceMap)) {
-                if (char && voice) voiceCache[char] = voice;
+            const ctx       = SillyTavern.getContext();
+            const tts       = ctx.extensionSettings?.tts ?? {};
+            // Voice map lives under the provider's own key, not at tts.voiceMap
+            const providerSettings = tts[EXT_NAME] ?? {};
+            const voiceMap  = providerSettings.voiceMap ?? {};
+            console.debug(`[${EXT_NAME}] provider voiceMap:`, voiceMap);
+            // Keys are formatted as: "CharName (\"Quotes\")", "CharName (*Text inside asterisks*)", etc.
+            // Extract character name (everything before the last ' (') and pick first non-disabled voice.
+            for (const [key, voice] of Object.entries(voiceMap)) {
+                if (!voice || voice === 'disabled' || voice === '[Default Voice]') continue;
+                const match = key.match(/^(.+?)\s+\(/);
+                const char  = match ? match[1].trim() : key;
+                if (char && !voiceCache[char]) voiceCache[char] = voice;
             }
             console.debug(`[${EXT_NAME}] voiceCache preloaded:`, { ...voiceCache });
         } catch (e) { console.warn(`[${EXT_NAME}] voiceCache preload error:`, e); }
