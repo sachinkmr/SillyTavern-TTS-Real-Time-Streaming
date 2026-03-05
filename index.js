@@ -123,8 +123,12 @@ function onGenerationStarted() {
     try {
         const ctx      = SillyTavern.getContext();
         const charName = ctx.name2;
-        const voiceMap = ctx.extensionSettings?.tts?.voiceMap ?? {};
+        // ST stores the voice map at extension_settings.tts.voiceMap
+        const ttsSettings = ctx.extensionSettings?.tts ?? {};
+        const voiceMap    = ttsSettings.voiceMap ?? {};
+        console.debug(`[${EXT_NAME}] streaming voiceMap:`, voiceMap, `charName: "${charName}"`);
         if (charName && voiceMap[charName]) voiceId = voiceMap[charName];
+        console.debug(`[${EXT_NAME}] streaming resolved voiceId: "${voiceId}"`);
     } catch (e) { console.warn(`[${EXT_NAME}] voiceMap error:`, e); }
 
     openStreamWs(voiceId);
