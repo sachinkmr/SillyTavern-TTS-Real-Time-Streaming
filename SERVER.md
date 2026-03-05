@@ -1,11 +1,16 @@
-# Qwen3-TTS Server — Extension API Reference
+# WebSocket TTS Server — Extension Interface Spec
 
-This document describes everything the SillyTavern extension expects from the backend server.  
-The reference implementation is [`andimarafioti/faster-qwen3-tts`](https://github.com/andimarafioti/faster-qwen3-tts) (`demo/server.py`).
+This document describes the server interface the SillyTavern extension expects.
+Any TTS backend that implements these two endpoints will work — the model is your choice.
+
+Reference implementation: [`andimarafioti/faster-qwen3-tts`](https://github.com/andimarafioti/faster-qwen3-tts) (`demo/server.py`).  
+Other options: XTTS, Piper, Kokoro, Orpheus, any custom server.
 
 ---
 
 ## Quick Start
+
+Example using faster-qwen3-tts:
 
 ```bash
 python demo/server.py \
@@ -14,7 +19,7 @@ python demo/server.py \
   --port 7860
 ```
 
-For lighter hardware use the smaller model:
+For lighter hardware:
 
 ```bash
 python demo/server.py \
@@ -24,7 +29,8 @@ python demo/server.py \
 ```
 
 The extension connects via **HTTP** (for `/speakers`) and **WebSocket** (for TTS generation).  
-No HTTPS is required — the Web Audio API `decodeAudioData` path used by this extension works over plain `ws://`.
+No HTTPS is required — the Web Audio API `decodeAudioData` path used by this extension works over plain `ws://`.  
+Any server that speaks this protocol is compatible, regardless of the underlying TTS model.
 
 ---
 

@@ -1,23 +1,26 @@
 /**
- * Qwen TTS — Real-Time Streaming  (v1.3.0)
+ * WebSocket TTS — Real-Time Streaming  (v1.4.0)
  * SillyTavern Extension
  *
  * Registers as a proper ST TTS provider — gives the Narrate button,
  * per-character voice map, enable/disable toggle, and voice preview
  * automatically (same as XTTSv2 / tts-webui).
  *
+ * Works with any TTS server that exposes GET /speakers and WS /ws/tts.
+ * See SERVER.md for the required server interface.
+ *
  * BONUS: Real-time streaming mode speaks each sentence the moment it is
  * generated, without waiting for the full reply to finish.
  *
  * Install: copy folder to SillyTavern/public/scripts/extensions/third-party/
- *          Enable in Extensions, then select "Qwen3 TTS (Streaming)" in TTS panel.
+ *          Enable in Extensions, then select "WS TTS (Streaming)" in TTS panel.
  * Note: If Real-time Streaming is ON, disable "Auto-read aloud" in TTS settings
  *       to avoid double-playback after generation completes.
  */
 
 // ── Module-level streaming state ──────────────────────────────────────────────
 
-const EXT_NAME = 'Qwen3 TTS (Streaming)';
+const EXT_NAME = 'WS TTS (Streaming)';
 
 let ws               = null;
 let audioCtx         = null;
@@ -30,7 +33,7 @@ let currentProvider  = null;
 
 // Populated after dynamic import of ST's TTS index
 let _saveTtsProviderSettings = () => {};
-let _getPreviewString        = () => 'Hello, this is a test of the Qwen TTS voice.';
+let _getPreviewString        = () => 'Hello, this is a test of the text to speech voice.';
 
 // ── Audio helpers ─────────────────────────────────────────────────────────────
 
@@ -172,7 +175,7 @@ function silentWav() {
 
 // ── Provider class ─────────────────────────────────────────────────────────────
 
-class QwenTtsStreamingProvider {
+class WsTtsStreamingProvider {
 
     settings = {};
     voices   = [];
@@ -201,11 +204,11 @@ class QwenTtsStreamingProvider {
             .join('\n                ');
 
         return `
-<div id="qts_provider_settings">
+<div id="wts_provider_settings">
     <div class="flex gap10px marginBot10 alignItemsFlexEnd">
         <div class="flex1 flexFlowColumn">
-            <label for="qts_endpoint">Provider Endpoint (ws:// or wss://):</label>
-            <input id="qts_endpoint" type="text" class="text_pole" maxlength="300"
+            <label for="wts_endpoint">Provider Endpoint (ws:// or wss://):</label>
+            <input id="wts_endpoint" type="text" class="text_pole" maxlength="300"
                    value="${s.provider_endpoint}"
                    placeholder="ws://192.168.1.100:7860/ws/tts" />
         </div>
@@ -213,23 +216,23 @@ class QwenTtsStreamingProvider {
 
     <div class="flex gap10px marginBot10">
         <div class="flex1 flexFlowColumn">
-            <label for="qts_language">Language:</label>
-            <select id="qts_language" class="text_pole">
+            <label for="wts_language">Language:</label>
+            <select id="wts_language" class="text_pole">
                 ${langOptions}
             </select>
         </div>
         <div class="flex1 flexFlowColumn">
-            <label for="qts_volume">
-                Volume: <span id="qts_volume_label">${s.volume.toFixed(2)}</span>
+            <label for="wts_volume">
+                Volume: <span id="wts_volume_label">${s.volume.toFixed(2)}</span>
             </label>
-            <input id="qts_volume" type="range" min="0" max="2" step="0.05"
+            <input id="wts_volume" type="range" min="0" max="2" step="0.05"
                    value="${s.volume}" style="width:100%;margin-top:6px" />
         </div>
     </div>
 
     <div class="marginBot10">
         <label class="checkbox_label">
-            <input id="qts_streaming" type="checkbox" ${s.streaming ? 'checked' : ''} />
+            <input id="wts_streaming" type="checkbox" ${s.streaming ? 'checked' : ''} />
             <span>Real-time Streaming
                 <small style="color:#aaa;display:block;margin-top:2px">
                     Speaks each sentence as the LLM generates it.
@@ -247,30 +250,30 @@ class QwenTtsStreamingProvider {
         this.settings = Object.assign({}, this.defaultSettings, settings ?? {});
 
         // Update DOM with saved values
-        $('#qts_endpoint').val(this.settings.provider_endpoint);
-        $('#qts_language').val(this.settings.language);
-        $('#qts_volume').val(this.settings.volume);
-        $('#qts_volume_label').text(Number(this.settings.volume).toFixed(2));
-        $('#qts_streaming').prop('checked', this.settings.streaming);
+        $('#wts_endpoint').val(this.settings.provider_endpoint);
+        $('#wts_language').val(this.settings.language);
+        $('#wts_volume').val(this.settings.volume);
+        $('#wts_volume_label').text(Number(this.settings.volume).toFixed(2));
+        $('#wts_streaming').prop('checked', this.settings.streaming);
 
         // Bind change handlers (off() first to prevent stacking)
-        $('#qts_endpoint').off('change').on('change', () => {
-            this.settings.provider_endpoint = $('#qts_endpoint').val().trim();
+        $('#wts_endpoint').off('change').on('change', () => {
+            this.settings.provider_endpoint = $('#wts_endpoint').val().trim();
             _saveTtsProviderSettings();
         });
-        $('#qts_language').off('change').on('change', () => {
-            this.settings.language = $('#qts_language').val();
+        $('#wts_language').off('change').on('change', () => {
+            this.settings.language = $('#wts_language').val();
             _saveTtsProviderSettings();
         });
-        $('#qts_volume').off('input').on('input', (e) => {
+        $('#wts_volume').off('input').on('input', (e) => {
             const v = parseFloat(e.target.value);
             this.settings.volume = v;
-            $('#qts_volume_label').text(v.toFixed(2));
+            $('#wts_volume_label').text(v.toFixed(2));
             if (gainNode) gainNode.gain.value = v;
             _saveTtsProviderSettings();
         });
-        $('#qts_streaming').off('change').on('change', () => {
-            this.settings.streaming = $('#qts_streaming').is(':checked');
+        $('#wts_streaming').off('change').on('change', () => {
+            this.settings.streaming = $('#wts_streaming').is(':checked');
             _saveTtsProviderSettings();
         });
 
@@ -409,12 +412,12 @@ jQuery(async () => {
     _saveTtsProviderSettings = saveTtsProviderSettings;
     _getPreviewString        = getPreviewString;
 
-    const provider = new QwenTtsStreamingProvider();
+    const provider = new WsTtsStreamingProvider();
     currentProvider = provider;
 
     // Register with ST's TTS system — hooks up Narrate button, voice map UI,
     // enable/disable toggle, voice preview, and the provider settings panel.
-    registerTtsProvider('Qwen3 TTS (Streaming)', provider);
+    registerTtsProvider('WS TTS (Streaming)', provider);
 
     // Hook generation events for real-time streaming
     const { eventSource, event_types } = SillyTavern.getContext();
@@ -423,5 +426,5 @@ jQuery(async () => {
     eventSource.on(event_types.GENERATION_ENDED,      onGenerationEnded);
     eventSource.on(event_types.GENERATION_STOPPED,    onGenerationStopped);
 
-    console.info(`[${EXT_NAME}] Loaded — select "${EXT_NAME}" in Extensions → TTS panel`);
+    console.info(`[${EXT_NAME}] v1.4.0 loaded — select "${EXT_NAME}" in Extensions → TTS panel`);
 });

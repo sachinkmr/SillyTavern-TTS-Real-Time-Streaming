@@ -1,19 +1,19 @@
-# SillyTavern — Qwen3 TTS Real-Time Streaming
+# SillyTavern — WebSocket TTS Real-Time Streaming
 
 A SillyTavern extension that **registers as a proper TTS provider** — giving you the Narrate button, per-character voice map, and voice preview — with a bonus real-time streaming mode that speaks each sentence **as the LLM generates it**, instead of waiting for the full reply.
 
-Powered by the [faster-qwen3-tts](https://github.com/andimarafioti/faster-qwen3-tts) local server via a WebSocket pipeline.
+Works with **any TTS server** that implements the simple WebSocket interface described in [SERVER.md](SERVER.md). The reference server implementation is [faster-qwen3-tts](https://github.com/andimarafioti/faster-qwen3-tts), but you can use any model (XTTS, Piper, Kokoro, Orpheus, custom, …).
 
 ---
 
 ## How it works
 
 ```
-LLM token stream → WebSocket /ws/tts → Qwen3-TTS generates per sentence → WAV audio in browser
+LLM token stream → WebSocket /ws/tts → TTS server generates per sentence → WAV audio in browser
 ```
 
 **Real-time streaming mode:**
-1. When ST starts an LLM reply, the extension opens a WebSocket to your Qwen3-TTS server.
+1. When ST starts an LLM reply, the extension opens a WebSocket to your TTS server.
 2. Each token is forwarded incrementally.
 3. The server buffers tokens, detects sentence boundaries, and generates audio per sentence.
 4. Each WAV is scheduled and played immediately via the Web Audio API.
@@ -30,9 +30,9 @@ The extension also handles the Narrate button and per-message audio replay by co
 
 | Requirement | Notes |
 |---|---|
-| [faster-qwen3-tts](https://github.com/andimarafioti/faster-qwen3-tts) server | Needs `GET /speakers` and `WS /ws/tts` — see [SERVER.md](SERVER.md) |
+| A TTS server implementing `GET /speakers` + `WS /ws/tts` | See [SERVER.md](SERVER.md) for the interface spec. Reference: [faster-qwen3-tts](https://github.com/andimarafioti/faster-qwen3-tts) |
 | SillyTavern (recent release) | Tested on release branch |
-| CUDA GPU recommended | For real-time generation speed; CPU works but adds latency |
+| GPU recommended | For real-time generation speed; CPU works but adds latency |
 
 ---
 
@@ -53,7 +53,7 @@ Hard-refresh the browser (`Ctrl+Shift+R`). The extension loads automatically.
 ## Configuration
 
 1. Open **Extensions** panel → **TTS** (the headphone icon).
-2. In the **Provider** dropdown, select **"Qwen3 TTS (Streaming)"**.
+2. In the **Provider** dropdown, select **"WS TTS (Streaming)"**.
 3. The provider settings panel appears:
 
 | Setting | Description | Example |
@@ -105,7 +105,7 @@ If **Real-time Streaming** is enabled:
 
 **First sentence is slow / cut off**
 - The server needs a sentence-ending character before it flushes. Very short openers are normal.
-- Try the lighter model `Qwen3-TTS-12Hz-0.6B-Base` for lower latency.
+- If using Qwen3-TTS, try the lighter `Qwen3-TTS-12Hz-0.6B-Base` model for lower latency.
 
 **Narrate button plays silence**
 - If you clicked Narrate within 8 s of a streamed reply, the dedup window suppressed it. Wait 8 s and try again.
@@ -122,9 +122,9 @@ See **[SERVER.md](SERVER.md)** for full endpoint documentation, request/response
 
 ```
 SillyTavern-TTS-Real-Time-Streaming/
-├── manifest.json   Extension metadata (v1.3.0)
+├── manifest.json   Extension metadata (v1.4.0)
 ├── index.js        Provider class + real-time streaming logic
 ├── README.md       This file
-└── SERVER.md       Server endpoint API reference
+└── SERVER.md       Server interface specification
 ```
 
