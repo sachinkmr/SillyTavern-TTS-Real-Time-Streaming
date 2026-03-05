@@ -312,6 +312,26 @@ class WsTtsStreamingProvider {
         });
 
         await this.checkReady();
+        this._preloadVoiceCache();
+    }
+
+    /** Parse power_user.tts_voicemap into voiceCache so streaming has voices from the first generation. */
+    _preloadVoiceCache() {
+        try {
+            const pu = window.power_user;
+            const raw = pu?.tts_voicemap ?? '';
+            console.debug(`[${EXT_NAME}] tts_voicemap raw:`, raw, 'power_user keys:', pu ? Object.keys(pu).filter(k => k.includes('tts')) : 'N/A');
+            if (raw) {
+                for (const pair of raw.split('|')) {
+                    const idx = pair.indexOf(':');
+                    if (idx === -1) continue;
+                    const char  = pair.slice(0, idx).trim();
+                    const voice = pair.slice(idx + 1).trim();
+                    if (char && voice) voiceCache[char] = voice;
+                }
+            }
+            console.debug(`[${EXT_NAME}] voiceCache preloaded:`, { ...voiceCache });
+        } catch (e) { console.warn(`[${EXT_NAME}] voiceCache preload error:`, e); }
     }
 
     // ── URL helpers ───────────────────────────────────────────────────────────
