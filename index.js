@@ -41,6 +41,17 @@ let _getCharacters           = () => ({});  // returns char→voice map
 
 // ── Audio helpers ─────────────────────────────────────────────────────────────
 
+// Browsers block AudioContext playback until a user gesture has occurred.
+// We listen for any click or keydown so the context is unlocked and running
+// before the first TTS audio chunk arrives from the server.
+function _resumeAudioContextIfNeeded() {
+    if (audioCtx && audioCtx.state === 'suspended') {
+        audioCtx.resume().catch(() => {});
+    }
+}
+document.addEventListener('click',   _resumeAudioContextIfNeeded, { capture: true, passive: true });
+document.addEventListener('keydown', _resumeAudioContextIfNeeded, { capture: true, passive: true });
+
 function ensureAudioContext() {
     if (!audioCtx || audioCtx.state === 'closed') {
         audioCtx     = new (window.AudioContext || window.webkitAudioContext)();
@@ -49,26 +60,30 @@ function ensureAudioContext() {
         gainNode.connect(audioCtx.destination);
         nextStartTime = audioCtx.currentTime;
     }
-    if (audioCtx.state === 'suspended') audioCtx.resume();
+    if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
 }
 
-function scheduleAudioChunk(arrayBuffer) {
+async function scheduleAudioChunk(arrayBuffer) {
     ensureAudioContext();
     const ctx  = audioCtx;
     const gain = gainNode;
-    ctx.decodeAudioData(
-        arrayBuffer.slice(0),
-        (decoded) => {
-            if (ctx.state === 'closed') return;
-            const src = ctx.createBufferSource();
-            src.buffer  = decoded;
-            src.connect(gain);
-            const startAt   = Math.max(ctx.currentTime + 0.02, nextStartTime);
-            src.start(startAt);
-            nextStartTime   = startAt + decoded.duration;
-        },
-        (err) => console.warn(`[${EXT_NAME}] Decode error:`, err),
-    );
+    try {
+        // Ensure context is running before we decode and schedule.
+        // If a user gesture has occurred, this resolves instantly.
+        if (ctx.state === 'suspended') await ctx.resume();
+        const decoded = await ctx.decodeAudioData(arrayBuffer.slice(0));
+        // Bail out if the context was replaced or closed while we were decoding.
+        if (!audioCtx || ctx !== audioCtx || ctx.state === 'closed') return;
+        const src = ctx.createBufferSource();
+        src.buffer = decoded;
+        src.connect(gain);
+        // Recalculate startAt after the async decode so we use fresh currentTime.
+        const startAt = Math.max(ctx.currentTime + 0.02, nextStartTime);
+        src.start(startAt);
+        nextStartTime = startAt + decoded.duration;
+    } catch (err) {
+        console.warn(`[${EXT_NAME}] Decode error:`, err);
+    }
 }
 
 function stopAudio() {
