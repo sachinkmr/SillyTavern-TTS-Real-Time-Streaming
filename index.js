@@ -504,13 +504,19 @@ class WsTtsStreamingProvider {
             const socket  = new WebSocket(this.buildWsUrl(voiceId));
             socket.binaryType = 'arraybuffer';
 
-            const timer = setTimeout(() => {
-                socket.close();
-                reject(new Error(`[${EXT_NAME}] generateTts timeout`));
-            }, 60_000);
+            // The server may be queued behind another character’s synthesis
+            // session.  It sends [QUEUED] heartbeats every 15 s while waiting.
+            // We reset the deadline on every heartbeat and every audio chunk so
+            // the timeout only fires if there is genuine silence (no server
+            // activity) for the idle period — not if synthesis simply takes a
+            // long time.
+            const IDLE_MS   = 90_000;  // max silence between any server activity
+            let   timer     = setTimeout(() => { socket.close(); reject(new Error(`[${EXT_NAME}] generateTts timeout`)); }, IDLE_MS);
+            const resetTimer = () => { clearTimeout(timer); timer = setTimeout(() => { socket.close(); reject(new Error(`[${EXT_NAME}] generateTts timeout`)); }, IDLE_MS); };
 
-            socket.onopen    = () => { socket.send(text); socket.send('[END]'); };
+            socket.onopen    = () => { resetTimer(); socket.send(text); socket.send('[END]'); };
             socket.onmessage = (ev) => {
+                resetTimer();
                 if (ev.data instanceof ArrayBuffer) {
                     // Decode each WAV chunk into PCM now — the close handler
                     // awaits all promises before merging.
@@ -523,6 +529,8 @@ class WsTtsStreamingProvider {
                                 return null; }),
                     );
                 } else if (ev.data === '[DONE]') socket.close();
+                // [QUEUED] heartbeats are intentionally ignored here —
+                // resetTimer() above is the only action needed.
             };
             socket.onclose = async () => {
                 clearTimeout(timer);
