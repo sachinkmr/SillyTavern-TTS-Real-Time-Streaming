@@ -510,7 +510,11 @@ class WsTtsStreamingProvider {
      * have long expired by the time the user clicks it.
      */
     async generateTts(text, voiceId) {
-        if (this.settings.streaming && Date.now() - streamPlayedAt < 8_000) {
+        // Dedup: skip if streaming is actively generating OR recently finished.
+        // streamPlayedAt is reset to 0 at generation start, so we must also
+        // check isGenerating — otherwise Date.now()-0 is always > 8 000 and the
+        // dedup never fires while streaming is in progress, causing double-play.
+        if (this.settings.streaming && (isGenerating || (streamPlayedAt > 0 && Date.now() - streamPlayedAt < 8_000))) {
             return new Response(silentWav(), { headers: { 'Content-Type': 'audio/wav' } });
         }
         const blob = await this._collectWsAudio(text, voiceId);
