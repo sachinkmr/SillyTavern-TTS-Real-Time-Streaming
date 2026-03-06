@@ -108,7 +108,14 @@ function openStreamWs(voiceId = null) {
 
     ws              = new WebSocket(url);
     ws.binaryType   = 'arraybuffer';
-    ws.onopen   = () => console.info(`[${EXT_NAME}] WS connected`);
+    // Buffer tokens that arrive while the WS handshake is still in progress
+    // so no early tokens are silently dropped.
+    ws._tokenBuf    = [];
+    ws.onopen   = () => {
+        console.info(`[${EXT_NAME}] WS connected`);
+        const buf = ws._tokenBuf.splice(0);
+        if (buf.length) ws.send(buf.join(''));
+    };
     ws.onmessage = (ev) => {
         if (ev.data instanceof ArrayBuffer) scheduleAudioChunk(ev.data);
         else if (ev.data === '[DONE]') closeStreamWs();
@@ -177,12 +184,19 @@ function onStreamToken(text) {
         console.warn(`[${EXT_NAME}] WS dropped — reconnecting`);
         openStreamWs(currentVoiceId);
     }
-    if (!ws || ws.readyState !== WebSocket.OPEN) return; // still connecting — drop token
+    if (!ws) return;
 
     const delta = text.slice(lastSentLength);
     if (!delta.length) return;
     lastSentLength = text.length;
-    ws.send(delta);
+
+    if (ws.readyState === WebSocket.CONNECTING) {
+        // WS handshake not done yet — buffer the delta; onopen will flush.
+        ws._tokenBuf = ws._tokenBuf ?? [];
+        ws._tokenBuf.push(delta);
+    } else if (ws.readyState === WebSocket.OPEN) {
+        ws.send(delta);
+    }
 }
 
 function onGenerationEnded() {
@@ -533,8 +547,14 @@ class WsTtsStreamingProvider {
             socket.onmessage = (ev) => {
                 resetTimer();
                 if (ev.data instanceof ArrayBuffer) {
-                    // Decode each WAV chunk into PCM now — the close handler
-                    // awaits all promises before merging.
+                    // Play audio immediately as each chunk arrives so the user
+                    // hears the first sentence within ~1 s instead of waiting
+                    // for all sentences to be synthesized.
+                    scheduleAudioChunk(ev.data.slice(0));
+
+                    // Also decode for merging into the returned blob so ST's
+                    // internal audio pipeline (auto-read, Narrate history) gets
+                    // a proper combined WAV file.
                     const ctx = new (window.AudioContext || window.webkitAudioContext)();
                     decodePromises.push(
                         ctx.decodeAudioData(ev.data.slice(0))
